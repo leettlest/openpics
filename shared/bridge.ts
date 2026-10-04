@@ -236,6 +236,7 @@ export interface OpenPicsBridge {
     state(): Promise<{ maximized: boolean; fullScreen: boolean; visible: boolean }>,
     quit(): Promise<void>,
   }
+  onOpenChat(handler: () => void): () => void
   onCommand(handler: (command: string) => void): () => void,
   /** Local AI (llama.cpp, fully local). */
   ai: {

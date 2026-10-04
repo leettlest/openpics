@@ -134,6 +134,7 @@ const bridge: OpenPicsBridge = {
     state: () => ipcRenderer.invoke('win:state'),
     quit: () => ipcRenderer.invoke('win:quit')
   },
+    onOpenChat: (handler: () => void) => { return subscribe('openpics:open-chat', handler as any) },
   onCommand: (handler) => {
     return subscribe(COMMAND_CHANNEL, handler)
   }
