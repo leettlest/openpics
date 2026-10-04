@@ -1,6 +1,6 @@
 {
   "name": "openpics",
-  "version": "1.0.0-beta.6",
+  "version": "1.0.0-beta.7",
   "description": "A fast desktop picture browser for Windows with a built-in background remover and an MCP server, so an AI agent can search, edit, and file your photos. Fully local: no upload, no telemetry, no account.",
   "main": "./out/main/index.js",
   "bin": {
@@ -46,7 +46,7 @@
     "llama": "node scripts/fetch-llama.mjs",
     "prepackage": "npm run addons && npm run llama && npm run model && npm run vision",
     "build:test": "tsc -p tsconfig.test.json",
-    "test": "npm run build:mcp && npm run build:test && node tests/mcp.test.mjs && node tests/editing.test.mjs && node tests/filters.test.mjs && node tests/ai-vision.test.mjs && node tests/ai-tags.test.mjs && node tests/ai-similar.test.mjs && node tests/addons.test.mjs && node tests/video.test.mjs",
+    "test": "npm run build:mcp && npm run build:test && node tests/mcp.test.mjs && node tests/editing.test.mjs && node tests/filters.test.mjs && node tests/ai-vision.test.mjs && node tests/ai-tags.test.mjs && node tests/ai-similar.test.mjs && node tests/creatives-draw.test.mjs && node tests/addons.test.mjs && node tests/video.test.mjs",
     "mcp": "npm run build:mcp && node dist-mcp/mcp/server.js",
     "package": "npm run build && electron-builder --win --x64",
     "package:dir": "npm run build && electron-builder --win --x64 --dir"
