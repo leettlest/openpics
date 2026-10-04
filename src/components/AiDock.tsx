@@ -1,16 +1,17 @@
-import { ArrowClockwise, CaretRight, MagnifyingGlass, PaperPlaneRight, Sparkle, Tag, X } from '@phosphor-icons/react'
+import { ArrowClockwise, CaretRight, MagnifyingGlass, PaperPlaneRight, Sparkle, Tag, X, PaintBrush, Pen, Shapes, DownloadSimple, UploadSimple, Eraser, ArrowCounterClockwise, TrashSimple, TextT, Code, Swatches, Crop, FlipHorizontal, FlipVertical } from '@phosphor-icons/react'
 import { useEffect, useRef, useState } from 'react'
 import { thumbUrl } from '@shared/protocol'
 import { bridge } from '@/lib/bridge'
 import { AUTOTAG_LIMIT, useLibrary } from '@/store/library'
 import { Button, IconButton, Segmented } from './ui'
 
-type DockTab = 'chat' | 'tags' | 'similar'
+type DockTab = 'chat' | 'tags' | 'similar' | 'creatives'
 
 const TAB_OPTIONS: { value: DockTab; label: string }[] = [
   { value: 'chat', label: 'Chat' },
   { value: 'tags', label: 'Tags' },
-  { value: 'similar', label: 'Similar' }
+  { value: 'similar', label: 'Similar' },
+  { value: 'creatives', label: 'Creatives' },
 ]
 
 /**
@@ -123,7 +124,7 @@ export function AiDock() {
       </p>
       <Button size="sm" variant="solid" className="mt-2" onClick={() => void reload()}>
         <ArrowClockwise size={13} weight="regular" />
-        {reloading ? 'Checking…' : 'Reload'}
+        {reloading ? 'CheckingΓÇª' : 'Reload'}
       </Button>
     </div>
   ) : null
@@ -146,7 +147,7 @@ export function AiDock() {
         <span className="min-w-0 flex-1 truncate text-[11px] text-ink-3">
           {modelReady
             ? visionReady
-              ? 'Local model ready · reads photos'
+              ? 'Local model ready ┬╖ can read photos and chat'
               : 'Local model ready'
             : 'No local model'}
         </span>
@@ -165,8 +166,7 @@ export function AiDock() {
             {messages.length === 0 ? (
               <div className="flex flex-col gap-2 text-[12px] leading-relaxed text-ink-3">
                 <p>
-                  Ask about the pictures you have selected{visionReady ? ', or select photos and ask what they show' : ''},
-                  or have it name and group them. Everything runs on this machine.
+                  Ask anything about your pictures, or chat normally. Select photos to give them context.{visionReady ? " It can also look at selected photos." : ""}
                 </p>
                 {noModelNote}
               </div>
@@ -191,7 +191,7 @@ export function AiDock() {
                 })}
                 {thinking ? (
                   <div className="mr-6 rounded-[8px] border border-line px-3 py-2 text-[12px] text-ink-3">
-                    Thinking…
+                    ThinkingΓÇª
                   </div>
                 ) : null}
               </div>
@@ -211,7 +211,7 @@ export function AiDock() {
                 }}
                 rows={2}
                 disabled={!modelReady || thinking}
-                placeholder={modelReady ? 'Ask about your pictures…' : 'Add a model to chat'}
+                placeholder={modelReady ? 'Ask about your pictures or chat.' : 'Add a model to chat'}
                 aria-label="Message the AI assistant"
                 className="min-h-[44px] flex-1 resize-none rounded-[8px] border border-line bg-raised px-2.5 py-2 text-[12px] text-ink placeholder:text-ink-3 transition-colors duration-150 focus:border-line-strong focus:outline-none disabled:opacity-50"
               />
@@ -246,7 +246,7 @@ export function AiDock() {
               >
                 <Tag size={13} weight="regular" />
                 {aiTagging
-                  ? 'Tagging…'
+                  ? 'TaggingΓÇª'
                   : selectedCount > AUTOTAG_LIMIT
                     ? `Suggest tags (first ${tagTargets} of ${selectedCount})`
                     : `Suggest tags (${selectedCount})`}
@@ -295,7 +295,7 @@ export function AiDock() {
               onClick={() => current && void findSimilar(current.path)}
             >
               <MagnifyingGlass size={13} weight="regular" />
-              {aiSimilarBusy ? 'Searching…' : 'Find similar in this view'}
+              {aiSimilarBusy ? 'SearchingΓÇª' : 'Find similar in this view'}
             </Button>
             {!current ? <span className="text-[11px]">Click a photo in the grid first.</span> : null}
 
@@ -328,6 +328,44 @@ export function AiDock() {
           </div>
         </div>
       ) : null}
+      {tab === 'creatives' ? (
+        <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3 text-[12px] leading-relaxed text-ink-3">
+          <div className="flex flex-col gap-3">
+            <p>Paint, sketch, draw SVG shapes freehand, and quick edits & creations — all local.</p>
+            <div className="flex flex-wrap gap-1">
+              <Button size="sm" variant="solid"><PaintBrush size={13} weight="regular" />Paint</Button>
+              <Button size="sm" variant="solid"><Pen size={13} weight="regular" />Freehand SVG</Button>
+              <Button size="sm" variant="ghost"><Shapes size={13} weight="regular" />Shapes</Button>
+              <Button size="sm" variant="ghost"><TextT size={13} weight="regular" />Text</Button>
+              <Button size="sm" variant="ghost"><Swatches size={13} weight="regular" />Colors</Button>
+              <Button size="sm" variant="ghost"><Crop size={13} weight="regular" />Crop</Button>
+              <Button size="sm" variant="ghost"><FlipHorizontal size={13} weight="regular" />Flip H</Button>
+              <Button size="sm" variant="ghost"><FlipVertical size={13} weight="regular" />Flip V</Button>
+              <Button size="sm" variant="ghost"><UploadSimple size={13} weight="regular" />Import</Button>
+              <Button size="sm" variant="ghost"><DownloadSimple size={13} weight="regular" />Export</Button>
+              <Button size="sm" variant="ghost"><Eraser size={13} weight="regular" />Erase</Button>
+              <Button size="sm" variant="ghost"><ArrowCounterClockwise size={13} weight="regular" />Undo</Button>
+              <Button size="sm" variant="ghost"><ArrowClockwise size={13} weight="regular" />Redo</Button>
+              <Button size="sm" variant="ghost"><TrashSimple size={13} weight="regular" />Clear</Button>
+              <Button size="sm" variant="ghost"><Code size={13} weight="regular" />SVG</Button>
+            </div>
+            <div className="rounded-[8px] border border-line bg-surface-2/40 p-2">
+              <div className="flex items-center justify-between text-[11px] text-ink-3">
+                <span>Canvas</span>
+                <span>Coming soon: full paint + SVG freehand</span>
+              </div>
+              <div className="mt-2 aspect-[4/3] w-full rounded-[6px] border border-line bg-raised/60" />
+            </div>
+            <p className="text-[11px] text-ink-3">Local-only. No network calls. Saved to exports or new files.</p>
+          </div>
+        </div>
+      ) : null}
     </aside>
   )
 }
+
+
+
+
+
+
