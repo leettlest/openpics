@@ -1,4 +1,4 @@
-import { useLibrary } from '../store/library'
+import { AUTOTAG_LIMIT, useLibrary } from '../store/library'
 import { bridge } from '@/lib/bridge'
 import { Button } from './ui'
 
@@ -9,6 +9,8 @@ export function SelectionBar() {
   const selectAll = useLibrary((s) => s.selectAll)
   const invertSelection = useLibrary((s) => s.invertSelection)
   const clearSelection = useLibrary((s) => s.clearSelection)
+  const tagSelection = useLibrary((s) => s.tagSelection)
+  const aiTagging = useLibrary((s) => s.aiTagging)
 
   const count = selected.size
   if (count < 1) return null
@@ -55,6 +57,15 @@ export function SelectionBar() {
       </Button>
       <Button size="sm" variant="solid" onClick={() => void revealSelected()}>
         Reveal
+      </Button>
+      <Button
+        size="sm"
+        variant="solid"
+        disabled={aiTagging}
+        title={count > AUTOTAG_LIMIT ? `Tags the first ${AUTOTAG_LIMIT} selected photos` : undefined}
+        onClick={() => void tagSelection()}
+      >
+        {aiTagging ? 'Tagging…' : 'Tag with AI'}
       </Button>
       <Button size="sm" variant="danger" onClick={() => void binSelected()}>
         Move to Recycle Bin

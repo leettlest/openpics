@@ -90,7 +90,8 @@ export const DEFAULT_SETTINGS: Settings = {
   aiDockWidth: 360,
   aiModelPath: '',
   aiPromptPath: '',
-  aiCollections: []
+  aiCollections: [],
+  aiTags: {}
 }
 
 export const THUMB_SCHEME = 'opencpics-thumb'

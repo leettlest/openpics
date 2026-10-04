@@ -34,6 +34,9 @@ export function getModelsDir(): string {
   const candidates = [
     resolve(process.resourcesPath, 'models'),
     resolve(process.resourcesPath, 'ai', 'models'),
+    // `npm run model` fills this in a checkout; the installed app has the same
+    // files under `resources/models`, which is checked first.
+    resolve(process.cwd(), 'vendor', 'models'),
     resolve(process.cwd(), 'models'),
     resolve(process.cwd(), 'build', 'models'),
   ]

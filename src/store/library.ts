@@ -1,9 +1,20 @@
 import { useEffect, useMemo } from 'react'
 import { create } from 'zustand'
 import { DEFAULT_SETTINGS, comparePhotos, type DriveInfo, type Photo, type ScanProgress, type ScanResult, type Settings, type SmartCollection, type SmartCollectionRule, type SortDir, type SortKey } from '@shared/protocol'
+import { normalizeTags } from '@shared/ai-tags'
+import type { SimilarHit } from '@shared/ai-similar'
 import { bridge } from '@/lib/bridge'
 
 export type ScanStatus = 'idle' | 'scanning' | 'ready' | 'error'
+
+/**
+ * How many photos one "tag selection" run will tag.
+ *
+ * Every photo is its own model call and the vision model costs seconds per
+ * picture on a CPU, so a whole-library selection would look hung. The dock
+ * states this number rather than a run quietly stopping short.
+ */
+export const AUTOTAG_LIMIT = 10
 
 /** A photo paired with its position in the full library. */
 export interface PhotoEntry {
@@ -65,6 +76,12 @@ interface LibraryState {
   aiThinking: boolean
   aiModelReady: boolean
   aiVisionReady: boolean
+  /** True while a batch of tags is being generated. */
+  aiTagging: boolean
+  /** True while a similarity search is in flight. */
+  aiSimilarBusy: boolean
+  /** The last similarity search: the photo searched from and its hits. */
+  aiSimilar: { path: string; results: SimilarHit[] } | null
   aiMessages: { role: 'user' | 'assistant'; content: string }[]
   photoTags: Map<string, string[]>
   exifCache: Map<string, unknown>
@@ -164,6 +181,15 @@ interface LibraryState {
   setAiDockWidth: (width: number) => void
   sendAiMessage: (text: string) => Promise<void>
   appendAiDelta: (delta: string) => void
+  /** Merges tag suggestions into the per-photo map and persists them. */
+  mergePhotoTags: (entries: Array<{ path: string; tags: string[] }>) => void
+  /** Replaces the tags of one photo; an empty list removes them. */
+  setPhotoTags: (path: string, tags: string[]) => void
+  /** Suggests tags for the current selection; returns how many got a tag. */
+  tagSelection: () => Promise<number>
+  /** Finds photos in the current view that look like `path`. */
+  findSimilar: (path: string) => Promise<void>
+  clearSimilar: () => void
 }
 
 function sortPhotos(raw: Photo[], key: SortKey, dir: SortDir): Photo[] {
@@ -489,6 +515,9 @@ export const useLibrary = create<LibraryState>((set, get) => ({
   aiThinking: false,
   aiModelReady: false,
   aiVisionReady: false,
+  aiTagging: false,
+  aiSimilarBusy: false,
+  aiSimilar: null,
   aiMessages: [],
   photoTags: new Map(),
   exifCache: new Map(),
@@ -501,7 +530,13 @@ export const useLibrary = create<LibraryState>((set, get) => ({
 
   async boot() {
     const settings = await bridge.settings.get()
-    set({ settings, collections: settings.aiCollections ?? [] })
+    set({
+      settings,
+      collections: settings.aiCollections ?? [],
+      // Tags live in settings so they survive a restart; the Map is the shape the
+      // filter and the dock read, so it is rebuilt once here.
+      photoTags: new Map(Object.entries(settings.aiTags ?? {}))
+    })
     // Probing 26 drive letters is cheap, and knowing what is attached before the
     // user reaches for the button avoids a "no drives" surprise.
     const drives = await bridge.library.drives()
@@ -627,6 +662,8 @@ export const useLibrary = create<LibraryState>((set, get) => ({
       ? sortPhotos(state.raw, settings.sortKey, settings.sortDir)
       : state.photos
     const collections = patch.aiCollections !== undefined ? (settings.aiCollections ?? []) : state.collections
+    const photoTags =
+      patch.aiTags !== undefined ? new Map(Object.entries(settings.aiTags ?? {})) : state.photoTags
     const activeCollectionId =
       state.activeCollectionId !== null && collections.some((c) => c.id === state.activeCollectionId)
         ? state.activeCollectionId
@@ -637,7 +674,8 @@ export const useLibrary = create<LibraryState>((set, get) => ({
       collections,
       activeCollectionId,
       photos,
-      visible: visibleIndices(photos, criteria, state.photoTags, state.exifCache)
+      photoTags,
+      visible: visibleIndices(photos, criteria, photoTags, state.exifCache)
     })
     // Which source and how deep to walk both decide what exists on disk, so any
     // change to them has to re-read from disk rather than relabel the old set.
@@ -1071,6 +1109,68 @@ export const useLibrary = create<LibraryState>((set, get) => ({
         return { aiMessages: messages, aiThinking: false }
       })
     }
+  },
+
+  mergePhotoTags(entries) {
+    if (entries.length === 0) return
+    const next = new Map(get().photoTags)
+    for (const entry of entries) {
+      const tags = normalizeTags(entry.tags)
+      if (tags.length === 0) next.delete(entry.path)
+      else next.set(entry.path, tags)
+    }
+    // The map is set before the patch so `patch` recomputes `visible` against the
+    // new tags, letting a tag filter or a tag rule pick them up in one render.
+    set({ photoTags: next })
+    void get().patch({ aiTags: Object.fromEntries(next) })
+  },
+
+  setPhotoTags(path, tags) {
+    get().mergePhotoTags([{ path, tags }])
+  },
+
+  async tagSelection() {
+    const state = get()
+    const targets = Array.from(state.selected)
+      .map((index) => state.photos[index])
+      .filter((photo): photo is Photo => photo !== undefined)
+      .slice(0, AUTOTAG_LIMIT)
+      .map((photo) => ({ id: photo.path, path: photo.path }))
+    if (targets.length === 0) return 0
+    set({ aiTagging: true })
+    try {
+      const results = await bridge.ai.autotag(targets)
+      get().mergePhotoTags(results.map((result) => ({ path: result.photoId, tags: result.tags })))
+      return results.filter((result) => result.tags.length > 0).length
+    } catch {
+      return 0
+    } finally {
+      set({ aiTagging: false })
+    }
+  },
+
+  async findSimilar(path) {
+    const state = get()
+    const candidates = state.visible
+      .map((index) => state.photos[index]?.path)
+      .filter((candidate): candidate is string => Boolean(candidate))
+    if (path === '' || candidates.length < 2) {
+      set({ aiSimilar: null })
+      return
+    }
+    set({ aiSimilarBusy: true })
+    try {
+      const results = await bridge.ai.similar(path, candidates)
+      set({ aiSimilar: { path, results } })
+    } catch {
+      set({ aiSimilar: null })
+    } finally {
+      set({ aiSimilarBusy: false })
+    }
+  },
+
+  clearSimilar() {
+    set({ aiSimilar: null })
   }
 }))
 

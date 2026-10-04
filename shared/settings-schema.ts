@@ -105,7 +105,27 @@ const DEFAULT_FALLBACK: Partial<Record<keyof Settings, unknown>> = {
   aiDockWidth: 360,
   aiModelPath: '',
   aiPromptPath: '',
-  aiCollections: []
+  aiCollections: [],
+  aiTags: {}
+}
+
+/**
+ * Coerces a tags blob from disk or a patch into the one shape the app reads.
+ *
+ * `acceptSetting` can only check that the value is an object, which would let a
+ * hand-edited `{"a.jpg": "cat"}` through. A bare string is iterable, so
+ * `FilterBar` would then render its letters as tags; dropping anything that is
+ * not an array of strings is what keeps that off the screen.
+ */
+function cleanTagRecord(raw: unknown): Record<string, string[]> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}
+  const out: Record<string, string[]> = {}
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!Array.isArray(value)) continue
+    const tags = value.filter((tag): tag is string => typeof tag === 'string' && tag.trim() !== '')
+    if (tags.length > 0) out[key] = tags
+  }
+  return out
 }
 
 /**
@@ -121,6 +141,7 @@ export function sanitizeSettings(raw: unknown, defaults: Settings): Settings {
     if (!(key in parsed)) continue
     acceptSetting(merged, key, parsed[key])
   }
+  merged.aiTags = cleanTagRecord(merged.aiTags)
   return merged
 }
 
@@ -131,5 +152,8 @@ export function applyPatch(current: Settings, patch: Partial<Settings>): Setting
     if (!(key in patch)) continue
     acceptSetting(next, key, patch[key])
   }
+  // Only worth re-cleaning when the patch touched tags: this runs on every
+  // settings change and a large tag record should not be walked for a sort click.
+  if ('aiTags' in patch) next.aiTags = cleanTagRecord(next.aiTags)
   return next
 }

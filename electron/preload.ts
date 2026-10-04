@@ -121,7 +121,8 @@ const bridge: OpenPicsBridge = {
     setPrompt: (content: string) => ipcRenderer.invoke('ai:setPrompt', content),
     chat: (message: string, context?: any) => ipcRenderer.invoke('ai:chat', message, context),
     onDelta: (handler) => subscribe(AI_DELTA_CHANNEL, handler),
-    autotag: (targets: Array<{ id: string; path: string }>) => ipcRenderer.invoke('ai:autotag', targets)
+    autotag: (targets: Array<{ id: string; path: string }>) => ipcRenderer.invoke('ai:autotag', targets),
+    similar: (path: string, candidates: string[]) => ipcRenderer.invoke('ai:similar', path, candidates)
   },
   win: {
     alwaysOnTop: (value) => ipcRenderer.invoke('win:always-on-top', value),

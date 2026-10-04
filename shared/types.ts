@@ -175,6 +175,14 @@ export interface Settings {
   aiModelPath: string
   aiPromptPath: string
   aiCollections: SmartCollection[]
+  /**
+   * Tags per photo, keyed by absolute path.
+   *
+   * Stored as a plain object rather than a Map because it is written to JSON.
+   * Keyed by path and not by index so a rescan, a re-sort or a filter cannot
+   * move a photo's tags onto its neighbour.
+   */
+  aiTags: Record<string, string[]>
 }
 
 export interface ThumbnailStats {

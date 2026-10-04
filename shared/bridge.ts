@@ -15,6 +15,7 @@ import type {
   AiModelInfo,
   AiState
 } from './ai-types'
+import type { SimilarHit } from './ai-similar'
 import type {
   ApplyOptions,
   BrushOptions,
@@ -254,8 +255,10 @@ export interface OpenPicsBridge {
     chat(message: string, context?: AiChatContext): Promise<AiChatReply>,
     /** Subscribe to streamed reply pieces; returns an unsubscribe function. */
     onDelta(handler: (delta: string) => void): () => void,
-    /** Suggest tags for the given files (text-only model: names, not pixels). */
-    autotag(targets: Array<{ id: string; path: string }>): Promise<Array<{ photoId: string; tags: string[] }>>
+    /** Suggest tags for the given files (from pixels when the vision model is present). */
+    autotag(targets: Array<{ id: string; path: string }>): Promise<Array<{ photoId: string; tags: string[] }>>,
+    /** Perceptually similar photos among `candidates`, closest first. */
+    similar(path: string, candidates: string[]): Promise<SimilarHit[]>
   }
 }
 

@@ -8,8 +8,10 @@
  * gigabyte from disk.
  *
  * Nothing here leaves the machine. The server binds 127.0.0.1 on a port chosen
- * free at launch, and it is shut down after a period of inactivity so the app is
- * not holding several hundred megabytes of RAM while the user browses.
+ * free at launch and is started as soon as the app is ready, then kept warm for
+ * the whole session: the weights stay resident so the first question after a
+ * pause is answered without re-reading half a gigabyte from disk. A watchdog
+ * pings it and restarts it if it ever dies, and it is stopped only on quit.
  */
 
 import { spawn, type ChildProcess } from 'node:child_process'
@@ -33,8 +35,10 @@ export type ChatOptions = {
   mmprojPath?: string
 }
 
-/** Model keeps the server alive for this long after the last reply. */
-const IDLE_SHUTDOWN_MS = 5 * 60 * 1000
+/** How often the watchdog checks the resident server is still healthy. */
+const KEEPALIVE_INTERVAL_MS = 60 * 1000
+/** The probe is local and cheap, but a saturated CPU can slow it; be generous. */
+const KEEPALIVE_TIMEOUT_MS = 10 * 1000
 /** A cold load of a 0.5B Q4 model is quick; this is generous for a slow disk. */
 const STARTUP_TIMEOUT_MS = 120 * 1000
 
@@ -43,7 +47,10 @@ let port = 0
 let runningModel: string | null = null
 let runningMmproj: string | null = null
 let starting: Promise<number> | null = null
-let idleTimer: NodeJS.Timeout | null = null
+let keepAlive: NodeJS.Timeout | null = null
+/** The weights we want resident; the watchdog restarts the server to match this. */
+let wantedModel: string | null = null
+let wantedMmproj: string | null = null
 let lastError: string | null = null
 const recentLog: string[] = []
 
@@ -106,19 +113,49 @@ async function waitForHealth(serverPort: number, proc: ChildProcess): Promise<vo
   throw new Error(`the local AI runtime did not become ready within ${STARTUP_TIMEOUT_MS / 1000}s`)
 }
 
-function clearIdle(): void {
-  if (idleTimer) {
-    clearTimeout(idleTimer)
-    idleTimer = null
+function stopKeepAlive(): void {
+  if (keepAlive) {
+    clearInterval(keepAlive)
+    keepAlive = null
   }
 }
 
-function touchIdle(): void {
-  clearIdle()
-  idleTimer = setTimeout(() => {
-    stopRuntime()
-  }, IDLE_SHUTDOWN_MS)
-  idleTimer.unref?.()
+function startKeepAlive(): void {
+  if (keepAlive) return
+  keepAlive = setInterval(() => {
+    void keepWarm()
+  }, KEEPALIVE_INTERVAL_MS)
+  keepAlive.unref?.()
+}
+
+/**
+ * Confirm the resident server is still answering and bring it back if not.
+ *
+ * The model is meant to stay loaded for the whole session, so a check that only
+ * observed would leave a crashed server dead until the user asked a question.
+ * When the probe fails the process is killed and the weights we want are loaded
+ * again; `ensureRuntime` collapses concurrent restarts.
+ */
+async function keepWarm(): Promise<void> {
+  if (!wantedModel || starting) return
+  if (isRuntimeRunning()) {
+    try {
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(), KEEPALIVE_TIMEOUT_MS)
+      const res = await fetch(`http://127.0.0.1:${port}/health`, { signal: controller.signal })
+      clearTimeout(timer)
+      if (res.ok) return
+    } catch {
+      // Unreachable or unhappy; fall through and restart it.
+    }
+    stopKeepAlive()
+    killRuntime()
+  }
+  try {
+    await ensureRuntime(wantedModel, wantedMmproj ?? undefined)
+  } catch {
+    // `ensureRuntime` already stopped the runtime; the next request retries.
+  }
 }
 
 async function start(modelPath: string, mmprojPath: string | null): Promise<number> {
@@ -163,6 +200,8 @@ async function start(modelPath: string, mmprojPath: string | null): Promise<numb
   port = chosen
   runningModel = modelPath
   runningMmproj = mmprojPath
+  wantedModel = modelPath
+  wantedMmproj = mmprojPath
 
   proc.stdout?.on('data', (chunk: Buffer) => remember(chunk.toString()))
   proc.stderr?.on('data', (chunk: Buffer) => remember(chunk.toString()))
@@ -173,7 +212,6 @@ async function start(modelPath: string, mmprojPath: string | null): Promise<numb
       port = 0
       runningModel = null
       runningMmproj = null
-      clearIdle()
     }
   })
   proc.on('error', (err) => {
@@ -195,7 +233,7 @@ async function start(modelPath: string, mmprojPath: string | null): Promise<numb
   }
 
   lastError = null
-  touchIdle()
+  startKeepAlive()
   return chosen
 }
 
@@ -204,29 +242,31 @@ async function start(modelPath: string, mmprojPath: string | null): Promise<numb
  *
  * A conversation without photos stays on the small text model; one with photos
  * switches to the vision model. The two are never resident at once, so the app
- * pays for the weights it is actually using, and the idle timer eventually
- * releases whichever is loaded.
+ * pays for the weights it is actually using. Whatever is loaded is then held
+ * warm for the rest of the session by the watchdog.
  */
 export async function ensureRuntime(modelPath: string, mmprojPath?: string): Promise<number> {
-  const wanted = mmprojPath ?? null
+  const mmproj = mmprojPath ?? null
+  wantedModel = modelPath
+  wantedMmproj = mmproj
   if (isRuntimeRunning()) {
-    if (runningModel === modelPath && runningMmproj === wanted) {
-      touchIdle()
+    if (runningModel === modelPath && runningMmproj === mmproj) {
+      startKeepAlive()
       return port
     }
     // Serving the wrong weights; the next request needs the other model.
-    stopRuntime()
+    killRuntime()
   }
   if (starting) await starting
   if (isRuntimeRunning()) {
-    if (runningModel === modelPath && runningMmproj === wanted) {
-      touchIdle()
+    if (runningModel === modelPath && runningMmproj === mmproj) {
+      startKeepAlive()
       return port
     }
-    stopRuntime()
+    killRuntime()
   }
   if (!starting) {
-    starting = start(modelPath, wanted).finally(() => {
+    starting = start(modelPath, mmproj).finally(() => {
       starting = null
     })
   }
@@ -246,7 +286,6 @@ export async function chat(
   onDelta: (delta: string) => void
 ): Promise<string> {
   const serverPort = await ensureRuntime(modelPath, options.mmprojPath)
-  touchIdle()
 
   const response = await fetch(`http://127.0.0.1:${serverPort}/v1/chat/completions`, {
     method: 'POST',
@@ -309,12 +348,11 @@ export async function chat(
     for (const line of buffer.split('\n')) consume(line.replace(/\r$/, ''))
   }
 
-  touchIdle()
   return full
 }
 
-export function stopRuntime(): void {
-  clearIdle()
+/** Kill the child and forget it, without touching the keep-alive intent. */
+function killRuntime(): void {
   const proc = child
   child = null
   port = 0
@@ -327,4 +365,29 @@ export function stopRuntime(): void {
       // Already gone.
     }
   }
+}
+
+/**
+ * Load the weights now and keep them resident, if not already serving them.
+ *
+ * Called once at launch so the model is ready before the user's first question,
+ * and again by the watchdog. Returns false rather than throwing when the runtime
+ * or model is missing, so a broken install still opens the app.
+ */
+export async function warmRuntime(modelPath: string, mmprojPath?: string): Promise<boolean> {
+  try {
+    await ensureRuntime(modelPath, mmprojPath)
+    return true
+  } catch (err) {
+    lastError = err instanceof Error ? err.message : String(err)
+    return false
+  }
+}
+
+/** Shut the server down for good, e.g. when the app quits. */
+export function stopRuntime(): void {
+  stopKeepAlive()
+  wantedModel = null
+  wantedMmproj = null
+  killRuntime()
 }

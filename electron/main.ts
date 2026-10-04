@@ -239,7 +239,7 @@ function sendProgress(progress: ScanProgress): void {
   if (win && !win.isDestroyed()) win.webContents.send(SCAN_PROGRESS_CHANNEL, progress)
 }
 
-import { autotagPhoto, chatAi, ensurePromptFile, findBundledModels, getAiState, initAi, pickDefaultModel, stopAi } from './ai'
+import { autotagPhoto, chatAi, ensurePromptFile, findBundledModels, findSimilar, getAiState, initAi, pickDefaultModel, stopAi, warmAi } from './ai'
 
 function wireIpc(): void {
   ipcMain.handle('settings:get', () => loadSettings())
@@ -384,6 +384,9 @@ function wireIpc(): void {
     }
     return results
   })
+  ipcMain.handle('ai:similar', (_e, path: string, candidates: string[]) =>
+    findSimilar(path, candidates ?? [])
+  )
   ipcMain.handle('wallpaper:get', () => getWallpaper())
   // Deliberately not debounced or rate-limited: the user asked for this desktop
   // and is watching it change. Nothing else in the app calls it.
@@ -502,6 +505,11 @@ if (!app.requestSingleInstanceLock()) {
     // A cold start with files on the command line: the window is not listening
     // yet, so these queue until did-finish-load.
     deliverFiles(libraryPathsFromArgv(process.argv.slice(1)))
+
+    // Load the local model in the background so the first question is instant.
+    // Starting a child process is not something first paint should wait on.
+    if (settings.aiEnabled) void warmAi()
+
 
     // Registering the context-menu entries is a handful of registry writes plus a
     // PowerShell round trip, which has no business blocking first paint. The

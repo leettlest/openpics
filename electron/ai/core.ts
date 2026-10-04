@@ -4,7 +4,7 @@ import { loadSettings } from '../settings'
 import { pickDefaultModel } from './manager'
 import { getVisionMmprojPath, getVisionModelPath } from './paths'
 import { ensurePromptFile, readPromptFile } from './prompt'
-import { chat, ensureRuntime, getRuntimeError, isRuntimeRunning, stopRuntime, type ChatMessage } from './runtime'
+import { chat, getRuntimeError, isRuntimeRunning, stopRuntime, warmRuntime, type ChatMessage } from './runtime'
 import { buildVisionMessage, MAX_VISION_IMAGES } from '../../shared/ai-vision'
 import type { AiChatContext, AiChatReply } from '../../shared/ai-types'
 
@@ -76,6 +76,19 @@ export async function ensureReady(): Promise<boolean> {
   return state.ready
 }
 
+/**
+ * Load the default model now instead of on the first question.
+ *
+ * Called once at launch: the weights are read from disk while the user is still
+ * orienting themselves and the server is left resident for the whole session.
+ * Failures are quiet, because a missing model must not stop the app from opening
+ * and the next real request will surface the reason in the dock.
+ */
+export async function warmAi(): Promise<boolean> {
+  if (!(await ensureReady()) || !state.modelPath) return false
+  return warmRuntime(state.modelPath)
+}
+
 /** Prompt text the user can edit, with a fallback if the file cannot be read. */
 function systemPrompt(): string {
   try {
@@ -106,7 +119,7 @@ function contextNote(context?: AiChatContext): string | null {
  */
 const VISION_MAX_EDGE = 512
 
-function imageDataUrl(path: string): string | null {
+export function imageDataUrl(path: string): string | null {
   try {
     let image = nativeImage.createFromPath(path)
     if (image.isEmpty()) return null
