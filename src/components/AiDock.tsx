@@ -40,12 +40,37 @@ export function AiDock() {
     useLibrary()
 
   const [tab, setTab] = useState<DockTab>('chat')
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const [color, _setColor] = useState('#111111')
+  const [size, _setSize] = useState(4)
+  const [opacity, _setOpacity] = useState(100)
+  const [mode, _setMode] = useState<'paint'|'erase'>('paint')
+  const [drawing, _setDrawing] = useState(false)
+  const history = useRef<ImageData[]>([])
+  const historyIdx = useRef(0)
+  const last = useRef<{x:number,y:number}|null>(null)
   useEffect(() => {
     const unsub = (window as any)?.opencpics?.onOpenChat?.(() => {
       try { setTab('chat'); (document.activeElement as HTMLElement)?.blur?.(); } catch (e) {}
     });
     return () => unsub?.();
   }, []);
+  useEffect(() => {
+    const c = canvasRef.current
+    if (!c || tab !== 'creatives') return
+    const ctx = c.getContext('2d', { willReadFrequently: true })
+    if (!ctx) return
+    const dpr = Math.max(1, window.devicePixelRatio)
+    const rect = c.getBoundingClientRect()
+    c.width = Math.floor(rect.width*dpr)
+    c.height = Math.floor(rect.height*dpr)
+    ctx.scale(dpr,dpr)
+    ctx.fillStyle = '#ffffff'
+    ctx.fillRect(0,0,rect.width,rect.height)
+    const id = ctx.getImageData(0,0,c.width,c.height)
+    history.current = [id]
+    historyIdx.current = 0
+  }, [tab])
 
   const [draft, setDraft] = useState('')
   const [reloading, setReloading] = useState(false)
@@ -131,7 +156,7 @@ export function AiDock() {
       </p>
       <Button size="sm" variant="solid" className="mt-2" onClick={() => void reload()}>
         <ArrowClockwise size={13} weight="regular" />
-        {reloading ? 'CheckingΓÇª' : 'Reload'}
+        {reloading ? 'Checking╬ô├ç┬¬' : 'Reload'}
       </Button>
     </div>
   ) : null
@@ -154,7 +179,7 @@ export function AiDock() {
         <span className="min-w-0 flex-1 truncate text-[11px] text-ink-3">
           {modelReady
             ? visionReady
-              ? 'Local model ready ┬╖ can read photos and chat'
+              ? 'Local model ready Γö¼Γòû can read photos and chat'
               : 'Local model ready'
             : 'No local model'}
         </span>
@@ -198,7 +223,7 @@ export function AiDock() {
                 })}
                 {thinking ? (
                   <div className="mr-6 rounded-[8px] border border-line px-3 py-2 text-[12px] text-ink-3">
-                    ThinkingΓÇª
+                    Thinking╬ô├ç┬¬
                   </div>
                 ) : null}
               </div>
@@ -253,7 +278,7 @@ export function AiDock() {
               >
                 <Tag size={13} weight="regular" />
                 {aiTagging
-                  ? 'TaggingΓÇª'
+                  ? 'Tagging╬ô├ç┬¬'
                   : selectedCount > AUTOTAG_LIMIT
                     ? `Suggest tags (first ${tagTargets} of ${selectedCount})`
                     : `Suggest tags (${selectedCount})`}
@@ -302,7 +327,7 @@ export function AiDock() {
               onClick={() => current && void findSimilar(current.path)}
             >
               <MagnifyingGlass size={13} weight="regular" />
-              {aiSimilarBusy ? 'SearchingΓÇª' : 'Find similar in this view'}
+              {aiSimilarBusy ? 'Searching╬ô├ç┬¬' : 'Find similar in this view'}
             </Button>
             {!current ? <span className="text-[11px]">Click a photo in the grid first.</span> : null}
 
@@ -338,7 +363,7 @@ export function AiDock() {
       {tab === 'creatives' ? (
         <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3 text-[12px] leading-relaxed text-ink-3">
           <div className="flex flex-col gap-3">
-            <p>Paint, sketch, draw SVG shapes freehand, and quick edits & creations — all local.</p>
+            <p>Paint, sketch, draw SVG shapes freehand, and quick edits & creations ΓÇö all local.</p>
             <div className="flex flex-wrap gap-1">
               <Button size="sm" variant="solid"><PaintBrush size={13} weight="regular" />Paint</Button>
               <Button size="sm" variant="solid"><Pen size={13} weight="regular" />Freehand SVG</Button>
@@ -361,7 +386,7 @@ export function AiDock() {
                 <span>Canvas</span>
                 <span>Coming soon: full paint + SVG freehand</span>
               </div>
-              <div className="mt-2 aspect-[4/3] w-full overflow-hidden rounded-[6px] border border-line bg-raised/60"><canvas id="creatives-canvas" className="h-full w-full touch-none" /></div>
+              <div className="mt-2 aspect-[4/3] w-full overflow-hidden rounded-[6px] border border-line bg-raised/60"><canvas id="creatives-canvas" ref={canvasRef} className="h-full w-full touch-none" onPointerDown={(e)=>{_setDrawing(true); const c=canvasRef.current; const ctx=c?.getContext("2d"); const r=c?.getBoundingClientRect(); if(c&&ctx&&r){const x=(e.clientX-r.left), y=(e.clientY-r.top); ctx.lineCap="round"; ctx.lineJoin="round"; ctx.strokeStyle=mode==="erase"?"#fff":color; ctx.lineWidth=size; ctx.globalAlpha=opacity/100; ctx.beginPath(); ctx.moveTo(x,y); ctx.lineTo(x,y); ctx.stroke(); last.current={x,y};}}} onPointerMove={(e)=>{if(!drawing)return; const c=canvasRef.current; const ctx=c?.getContext("2d"); const r=c?.getBoundingClientRect(); const l=last.current; if(c&&ctx&&r&&l){const x=(e.clientX-r.left), y=(e.clientY-r.top); ctx.lineCap="round"; ctx.lineJoin="round"; ctx.strokeStyle=mode==="erase"?"#fff":color; ctx.lineWidth=size; ctx.globalAlpha=opacity/100; ctx.beginPath(); ctx.moveTo(l.x,l.y); ctx.lineTo(x,y); ctx.stroke(); last.current={x,y};}}} onPointerUp={()=>{_setDrawing(false); last.current=null}} onPointerLeave={()=>{_setDrawing(false); last.current=null}} /></div>
             </div>
             <p className="text-[11px] text-ink-3">Local-only. No network calls. Saved to exports or new files.</p>
           </div>
@@ -370,6 +395,7 @@ export function AiDock() {
     </aside>
   )
 }
+
 
 
 
