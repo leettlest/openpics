@@ -31,41 +31,60 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const DEST = join(ROOT, 'vendor', 'vision')
 
 /**
- * SmolVLM-500M-Instruct, quantised to Q8_0.
+ * SmolVLM-500M-Instruct, quantised to Q4_K_M.
  *
  * A half-billion-parameter VLM is the honest choice for a bundled vision model:
  * it runs on a laptop CPU without a GPU, describes or answers a question about a
- * photo in a few seconds, and adds roughly half a gigabyte to the installer.
- * Q8_0 rather than Q4 because at this size the vision encoder is sensitive to
- * quantisation and the file is small either way. Apache-2.0, matching the app.
+ * photo in a few seconds. Apache-2.0, matching the app.
+ *
+ * Q4_K_M rather than Q8_0 because the installer has a hard ceiling. Bundling the
+ * Q8_0 weights pushed the NSIS payload past 1.2 GB, and the 32-bit makensis
+ * electron-builder ships cannot map an archive that size, so no setup.exe could
+ * be produced at all. Q4_K_M costs about 130 MB and brings the payload back
+ * under the limit; at this model size the difference is not visible in the short
+ * answers the dock asks for.
+ *
+ * The quantiser's own repository is the source, pinned to a commit, so the bytes
+ * behind the checksum cannot change under us.
  */
-const REVISION = '72e986006ef53e37cdd3f6d4241c90b0f01df376'
-const REPOSITORY = 'https://huggingface.co/ggml-org/SmolVLM-500M-Instruct-GGUF'
-const BASE = `${REPOSITORY}/resolve/${REVISION}`
+const VISION_REPOSITORY = 'https://huggingface.co/mradermacher/SmolVLM-500M-Instruct-GGUF'
+const VISION_REVISION = '5a73a0c3fd92f0ee751489eb18afc65512f24fb8'
+const VISION_BASE = `${VISION_REPOSITORY}/resolve/${VISION_REVISION}`
+
+/**
+ * The projector stays with the converters who shipped the first GGUF build, since
+ * nobody else publishes one. It is a separate graph from the language model and
+ * is loaded alongside whichever quantisation is bundled.
+ */
+const PROJECTOR_REPOSITORY = 'https://huggingface.co/ggml-org/SmolVLM-500M-Instruct-GGUF'
+const PROJECTOR_REVISION = '72e986006ef53e37cdd3f6d4241c90b0f01df376'
+const PROJECTOR_BASE = `${PROJECTOR_REPOSITORY}/resolve/${PROJECTOR_REVISION}`
 
 const FILES = [
   {
-    filename: 'SmolVLM-500M-Instruct-Q8_0.gguf',
-    source: `${BASE}/SmolVLM-500M-Instruct-Q8_0.gguf`,
-    sha256: '9d4612de6a42214499e301494a3ecc2be0abdd9de44e663bda63f1152fad1bf4',
-    size: 436806912
+    filename: 'SmolVLM-500M-Instruct.Q4_K_M.gguf',
+    source: `${VISION_BASE}/SmolVLM-500M-Instruct.Q4_K_M.gguf`,
+    sha256: '68486553817fd6fae1b560cf2c42b24dbdef5ee99b2de14a2d9d65ca2d81bea7',
+    size: 303252160,
+    repository: VISION_REPOSITORY,
+    revision: VISION_REVISION,
+    quantisation: 'Q4_K_M'
   },
   {
     filename: 'mmproj-SmolVLM-500M-Instruct-Q8_0.gguf',
-    source: `${BASE}/mmproj-SmolVLM-500M-Instruct-Q8_0.gguf`,
+    source: `${PROJECTOR_BASE}/mmproj-SmolVLM-500M-Instruct-Q8_0.gguf`,
     sha256: 'd1eb8b6b23979205fdf63703ed10f788131a3f812c7b1f72e0119d5d81295150',
-    size: 108783360
+    size: 108783360,
+    repository: PROJECTOR_REPOSITORY,
+    revision: PROJECTOR_REVISION,
+    quantisation: 'Q8_0 (projector)'
   }
 ]
 
 const SOURCE_INFO = {
   model: 'SmolVLM-500M-Instruct',
-  quantisation: 'Q8_0',
-  repository: REPOSITORY,
-  revision: REVISION,
-  revisionUrl: `${REPOSITORY}/commit/${REVISION}`,
   licence: 'Apache-2.0',
-  licenceUrl: `${REPOSITORY}/blob/main/LICENSE`
+  licenceUrl: 'https://huggingface.co/ggml-org/SmolVLM-500M-Instruct-GGUF/blob/main/LICENSE'
 }
 
 function log(...parts) {
@@ -149,15 +168,17 @@ function expectedStamp() {
 }
 
 function writeStamp() {
+  const sources = FILES.map(
+    (f) => `  ${f.filename}\n    ${f.repository}/commit/${f.revision}`
+  ).join('\n')
   writeFileSync(
     stampPath(),
     `${expectedStamp()}\n\n` +
-      `These weights are ${SOURCE_INFO.model}, quantised to ${SOURCE_INFO.quantisation}.\n` +
-      `They are distributed unmodified and are loaded by the app's local AI runtime\n` +
-      `to read photos the user attaches. The mmproj file is the matching projector.\n\n` +
-      `Source: ${SOURCE_INFO.repository}\n` +
-      `  revision ${SOURCE_INFO.revision}\n` +
-      `  ${SOURCE_INFO.revisionUrl}\n` +
+      `These weights are ${SOURCE_INFO.model}. They are distributed unmodified and are\n` +
+      `loaded by the app's local AI runtime to read photos the user attaches. The\n` +
+      `mmproj file is the matching multimodal projector; it is a separate graph and\n` +
+      `is loaded alongside whichever quantisation of the model is bundled.\n\n` +
+      `Sources:\n${sources}\n\n` +
       `Licence: ${SOURCE_INFO.licence}\n` +
       `  ${SOURCE_INFO.licenceUrl}\n`,
     'utf8'
