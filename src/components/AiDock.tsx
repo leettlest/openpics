@@ -14,6 +14,7 @@ export function AiDock() {
   const messages = useLibrary((s) => s.aiMessages)
   const thinking = useLibrary((s) => s.aiThinking)
   const modelReady = useLibrary((s) => s.aiModelReady)
+  const visionReady = useLibrary((s) => s.aiVisionReady)
   const { toggleAi, setAiDockExpanded, setAiDockWidth, sendAiMessage } = useLibrary()
 
   const [draft, setDraft] = useState('')
@@ -28,7 +29,7 @@ export function AiDock() {
     setReloading(true)
     try {
       const ai = await bridge.ai.init()
-      useLibrary.setState({ aiModelReady: ai.ready })
+      useLibrary.setState({ aiModelReady: ai.ready, aiVisionReady: ai.visionReady })
     } finally {
       setReloading(false)
     }
@@ -88,7 +89,11 @@ export function AiDock() {
         <Sparkle size={14} weight="fill" className="text-accent-text" />
         <span className="text-[12px] font-semibold">AI assistant</span>
         <span className="min-w-0 flex-1 truncate text-[11px] text-ink-3">
-          {modelReady ? 'Local model ready' : 'No local model'}
+          {modelReady
+            ? visionReady
+              ? 'Local model ready · reads photos'
+              : 'Local model ready'
+            : 'No local model'}
         </span>
         <IconButton label="Collapse AI" onClick={toggleAi}>
           <CaretRight size={15} weight="regular" />
@@ -99,8 +104,8 @@ export function AiDock() {
         {messages.length === 0 ? (
           <div className="flex flex-col gap-2 text-[12px] leading-relaxed text-ink-3">
             <p>
-              Ask about the pictures you have selected, or have it name and group them. Everything
-              runs on this machine.
+              Ask about the pictures you have selected{visionReady ? ', or select photos and ask what they show' : ''},
+              or have it name and group them. Everything runs on this machine.
             </p>
             {!modelReady ? (
               <div className="rounded-[8px] border border-line bg-raised p-3">

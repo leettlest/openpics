@@ -1,12 +1,16 @@
+import { nativeImage } from 'electron'
 import { existsSync } from 'node:fs'
 import { loadSettings } from '../settings'
 import { pickDefaultModel } from './manager'
+import { getVisionMmprojPath, getVisionModelPath } from './paths'
 import { ensurePromptFile, readPromptFile } from './prompt'
 import { chat, ensureRuntime, getRuntimeError, isRuntimeRunning, stopRuntime, type ChatMessage } from './runtime'
+import { buildVisionMessage, MAX_VISION_IMAGES } from '../../shared/ai-vision'
 import type { AiChatContext, AiChatReply } from '../../shared/ai-types'
 
 export type AiState = {
   ready: boolean
+  visionReady: boolean
   modelPath: string | null
   modelName: string | null
   promptPath: string | null
@@ -16,6 +20,7 @@ export type AiState = {
 
 let state: AiState = {
   ready: false,
+  visionReady: false,
   modelPath: null,
   modelName: null,
   promptPath: null,
@@ -50,6 +55,7 @@ export async function initAi(): Promise<AiState> {
     }
     state = {
       ready: !!modelPath,
+      visionReady: !!(getVisionModelPath() && getVisionMmprojPath()),
       modelPath: modelPath || null,
       modelName: modelPath ? nameOf(modelPath) : null,
       promptPath,
@@ -91,12 +97,53 @@ function contextNote(context?: AiChatContext): string | null {
 }
 
 /**
+ * Re-encode one photo as a small JPEG `data:` URL.
+ *
+ * A full-resolution photo is needless tokens and slow to encode on a CPU, so the
+ * longest edge is capped before encoding. Anything Electron cannot decode as an
+ * image - a video, a file that has since moved - returns null and is left out of
+ * the request rather than failing the whole message.
+ */
+const VISION_MAX_EDGE = 512
+
+function imageDataUrl(path: string): string | null {
+  try {
+    let image = nativeImage.createFromPath(path)
+    if (image.isEmpty()) return null
+    const size = image.getSize()
+    const longest = Math.max(size.width, size.height)
+    if (longest > VISION_MAX_EDGE) {
+      const scale = VISION_MAX_EDGE / longest
+      image = image.resize({
+        width: Math.max(1, Math.round(size.width * scale)),
+        height: Math.max(1, Math.round(size.height * scale)),
+        quality: 'good'
+      })
+    }
+    return `data:image/jpeg;base64,${image.toJPEG(82).toString('base64')}`
+  } catch {
+    return null
+  }
+}
+
+/** The first few readable photos among the selection, as inline images. */
+function attachedImages(context?: AiChatContext): string[] {
+  const urls: string[] = []
+  for (const path of context?.paths ?? []) {
+    if (urls.length >= MAX_VISION_IMAGES) break
+    const url = imageDataUrl(path)
+    if (url) urls.push(url)
+  }
+  return urls
+}
+
+/**
  * Answer one message, streaming pieces through `onDelta`.
  *
  * History comes from the renderer because it already holds the visible
- * conversation; main only assembles the request. The selected files are passed
- * as a system note rather than being read into the prompt: the bundled model is
- * text-only, so it can reason about names and counts but cannot see the images.
+ * conversation; main only assembles the request. When photos are attached and
+ * the bundled vision model is present, the message carries the images and runs
+ * on that model; otherwise it is a text question answered by the smaller model.
  */
 export async function chatAi(
   message: string,
@@ -110,19 +157,44 @@ export async function chatAi(
         'No local model is available, so I cannot answer. Run "npm run model" in a checkout or reinstall the app.'
     }
   }
-  const modelPath = state.modelPath
 
-  const messages: ChatMessage[] = [{ role: 'system', content: systemPrompt() }]
-  for (const turn of context?.history ?? []) {
-    if (turn.content.trim() === '') continue
-    messages.push({ role: turn.role, content: turn.content })
-  }
+  const images = state.visionReady ? attachedImages(context) : []
+  const visionModel = images.length > 0 ? getVisionModelPath() : null
+  const visionMmproj = images.length > 0 ? getVisionMmprojPath() : null
+  const useVision = visionModel !== null && visionMmproj !== null
+  const modelPath = useVision ? visionModel : state.modelPath
+
   const note = contextNote(context)
-  messages.push({ role: 'user', content: note ? `${note}\n\n${message}` : message })
+  const promptText = note ? `${note}\n\n${message}` : message
+  const messages: ChatMessage[] = []
+
+  if (useVision) {
+    // SmolVLM's template has no system role, so the instruction is folded into
+    // the user turn instead. Earlier turns stay plain text and are still useful.
+    for (const turn of context?.history ?? []) {
+      if (turn.content.trim() === '') continue
+      messages.push({ role: turn.role, content: turn.content })
+    }
+    messages.push({
+      role: 'user',
+      content: buildVisionMessage(`${systemPrompt()}\n\n${promptText}`, images)
+    })
+  } else {
+    messages.push({ role: 'system', content: systemPrompt() })
+    for (const turn of context?.history ?? []) {
+      if (turn.content.trim() === '') continue
+      messages.push({ role: turn.role, content: turn.content })
+    }
+    messages.push({ role: 'user', content: promptText })
+  }
 
   state = { ...state, thinking: true, lastError: null }
   try {
-    const reply = await chat(modelPath, { messages }, onDelta)
+    const reply = await chat(
+      modelPath,
+      { messages, maxTokens: useVision ? 256 : 512, mmprojPath: visionMmproj ?? undefined },
+      onDelta
+    )
     state = { ...state, thinking: false }
     return { content: reply }
   } catch (e: unknown) {

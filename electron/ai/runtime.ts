@@ -17,16 +17,20 @@ import { createServer } from 'node:net'
 import { existsSync } from 'node:fs'
 import { cpus } from 'node:os'
 import { getLlamaDir, getLlamaServerPath } from './paths'
+import type { ChatContentPart } from '../../shared/ai-vision'
 
 export type ChatMessage = {
   role: 'system' | 'user' | 'assistant'
-  content: string
+  /** A string for text turns, or OpenAI-style parts when images are attached. */
+  content: string | ChatContentPart[]
 }
 
 export type ChatOptions = {
   messages: ChatMessage[]
   maxTokens?: number
   temperature?: number
+  /** When set, the server is started with this projector so it can read images. */
+  mmprojPath?: string
 }
 
 /** Model keeps the server alive for this long after the last reply. */
@@ -36,6 +40,8 @@ const STARTUP_TIMEOUT_MS = 120 * 1000
 
 let child: ChildProcess | null = null
 let port = 0
+let runningModel: string | null = null
+let runningMmproj: string | null = null
 let starting: Promise<number> | null = null
 let idleTimer: NodeJS.Timeout | null = null
 let lastError: string | null = null
@@ -115,7 +121,7 @@ function touchIdle(): void {
   idleTimer.unref?.()
 }
 
-async function start(modelPath: string): Promise<number> {
+async function start(modelPath: string, mmprojPath: string | null): Promise<number> {
   const exe = getLlamaServerPath()
   if (!existsSync(exe)) {
     throw new Error(
@@ -137,6 +143,15 @@ async function start(modelPath: string): Promise<number> {
     '--port',
     String(chosen)
   ]
+  if (mmprojPath) {
+    // Reading photos. The projector is passed explicitly so no network fetch is
+    // attempted; `--mmproj-auto` belongs to the download-on-demand mode.
+    args.push('--mmproj', mmprojPath, '--no-mmproj-auto')
+  } else {
+    // A text-only request against a possibly multimodal model must not make
+    // llama-server reach for the internet to find a projector.
+    args.push('--no-mmproj')
+  }
 
   recentLog.length = 0
   const proc = spawn(exe, args, {
@@ -146,6 +161,8 @@ async function start(modelPath: string): Promise<number> {
   })
   child = proc
   port = chosen
+  runningModel = modelPath
+  runningMmproj = mmprojPath
 
   proc.stdout?.on('data', (chunk: Buffer) => remember(chunk.toString()))
   proc.stderr?.on('data', (chunk: Buffer) => remember(chunk.toString()))
@@ -154,6 +171,8 @@ async function start(modelPath: string): Promise<number> {
     if (wasRunning) {
       child = null
       port = 0
+      runningModel = null
+      runningMmproj = null
       clearIdle()
     }
   })
@@ -162,6 +181,8 @@ async function start(modelPath: string): Promise<number> {
     if (child === proc) {
       child = null
       port = 0
+      runningModel = null
+      runningMmproj = null
     }
   })
 
@@ -178,13 +199,34 @@ async function start(modelPath: string): Promise<number> {
   return chosen
 }
 
-export async function ensureRuntime(modelPath: string): Promise<number> {
+/**
+ * Points the runtime at a model, restarting the server if it is serving another.
+ *
+ * A conversation without photos stays on the small text model; one with photos
+ * switches to the vision model. The two are never resident at once, so the app
+ * pays for the weights it is actually using, and the idle timer eventually
+ * releases whichever is loaded.
+ */
+export async function ensureRuntime(modelPath: string, mmprojPath?: string): Promise<number> {
+  const wanted = mmprojPath ?? null
   if (isRuntimeRunning()) {
-    touchIdle()
-    return port
+    if (runningModel === modelPath && runningMmproj === wanted) {
+      touchIdle()
+      return port
+    }
+    // Serving the wrong weights; the next request needs the other model.
+    stopRuntime()
+  }
+  if (starting) await starting
+  if (isRuntimeRunning()) {
+    if (runningModel === modelPath && runningMmproj === wanted) {
+      touchIdle()
+      return port
+    }
+    stopRuntime()
   }
   if (!starting) {
-    starting = start(modelPath).finally(() => {
+    starting = start(modelPath, wanted).finally(() => {
       starting = null
     })
   }
@@ -203,7 +245,7 @@ export async function chat(
   options: ChatOptions,
   onDelta: (delta: string) => void
 ): Promise<string> {
-  const serverPort = await ensureRuntime(modelPath)
+  const serverPort = await ensureRuntime(modelPath, options.mmprojPath)
   touchIdle()
 
   const response = await fetch(`http://127.0.0.1:${serverPort}/v1/chat/completions`, {
@@ -276,6 +318,8 @@ export function stopRuntime(): void {
   const proc = child
   child = null
   port = 0
+  runningModel = null
+  runningMmproj = null
   if (proc && proc.exitCode === null) {
     try {
       proc.kill()

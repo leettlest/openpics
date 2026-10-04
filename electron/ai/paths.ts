@@ -1,5 +1,5 @@
 import { app } from 'electron'
-import { existsSync, mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 
 export function getUserDataDir(): string {
@@ -75,4 +75,45 @@ export function getLlamaDir(): string {
 
 export function getLlamaServerPath(): string {
   return join(getLlamaDir(), 'llama-server.exe')
+}
+
+/**
+ * The multimodal weights, shipped as extraResources under `vision/`.
+ *
+ * Two files live here, a vision model and its matching `mmproj` projector, and
+ * they must be used together. `npm run vision` fills `vendor/vision` in a
+ * checkout; the packaged build puts the same files beside `llama/`.
+ */
+export function getVisionDir(): string {
+  const candidates = [
+    resolve(process.resourcesPath, 'vision'),
+    resolve(process.resourcesPath, 'ai', 'vision'),
+    resolve(process.cwd(), 'vendor', 'vision'),
+    resolve(process.cwd(), 'vision'),
+  ]
+  for (const p of candidates) {
+    try {
+      if (existsSync(p)) return p
+    } catch {}
+  }
+  return resolve(process.resourcesPath, 'vision')
+}
+
+function firstGgufMatching(dir: string, test: (name: string) => boolean): string | null {
+  try {
+    const hit = readdirSync(dir).find((name) => name.toLowerCase().endsWith('.gguf') && test(name))
+    return hit ? join(dir, hit) : null
+  } catch {
+    return null
+  }
+}
+
+/** The vision language model, i.e. everything that is not the projector. */
+export function getVisionModelPath(): string | null {
+  return firstGgufMatching(getVisionDir(), (name) => !/^mmproj[-_]/i.test(name))
+}
+
+/** The multimodal projector that pairs with the vision model. */
+export function getVisionMmprojPath(): string | null {
+  return firstGgufMatching(getVisionDir(), (name) => /^mmproj[-_]/i.test(name))
 }

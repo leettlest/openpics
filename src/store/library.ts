@@ -64,6 +64,7 @@ interface LibraryState {
   aiOpen: boolean
   aiThinking: boolean
   aiModelReady: boolean
+  aiVisionReady: boolean
   aiMessages: { role: 'user' | 'assistant'; content: string }[]
   photoTags: Map<string, string[]>
   exifCache: Map<string, unknown>
@@ -487,6 +488,7 @@ export const useLibrary = create<LibraryState>((set, get) => ({
   aiOpen: initial.aiDockExpanded ?? true,
   aiThinking: false,
   aiModelReady: false,
+  aiVisionReady: false,
   aiMessages: [],
   photoTags: new Map(),
   exifCache: new Map(),
@@ -508,8 +510,8 @@ export const useLibrary = create<LibraryState>((set, get) => ({
     // why it cannot answer, instead of failing on the first message.
     void bridge.ai
       .init()
-      .then((ai) => set({ aiModelReady: ai.ready }))
-      .catch(() => set({ aiModelReady: false }))
+      .then((ai) => set({ aiModelReady: ai.ready, aiVisionReady: ai.visionReady }))
+      .catch(() => set({ aiModelReady: false, aiVisionReady: false }))
     // The persisted mode is the source the user last chose, so a machine left on
     // "This PC" has to come back up scanning drives rather than a stale folder.
     const scan = get().settings.scanMode === 'computer' ? get().scanComputer : get().rescan
@@ -1027,9 +1029,12 @@ export const useLibrary = create<LibraryState>((set, get) => ({
     const message = text.trim()
     if (message === '') return
     const state = get()
+    // Only pictures are sent: main can decode those into the vision request, and
+    // the note about the selection should not promise the model saw a video.
     const paths = Array.from(state.selected)
-      .map((index) => state.photos[index]?.path)
-      .filter((path): path is string => Boolean(path))
+      .map((index) => state.photos[index])
+      .filter((photo): photo is NonNullable<typeof photo> => photo?.kind === 'photo')
+      .map((photo) => photo.path)
     const history = state.aiMessages.slice(-12).map((turn) => ({ role: turn.role, content: turn.content }))
     set({
       aiMessages: [

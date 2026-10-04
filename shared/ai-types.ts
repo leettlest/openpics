@@ -13,6 +13,8 @@ export type AiModelInfo = {
 
 export type AiState = {
   ready: boolean
+  /** True when a bundled vision model is present, so attached photos are read. */
+  visionReady: boolean
   modelPath: string | null
   modelName: string | null
   promptPath: string | null
