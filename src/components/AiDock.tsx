@@ -40,6 +40,13 @@ export function AiDock() {
     useLibrary()
 
   const [tab, setTab] = useState<DockTab>('chat')
+  useEffect(() => {
+    const unsub = (window as any)?.opencpics?.onOpenChat?.(() => {
+      try { setTab('chat'); (document.activeElement as HTMLElement)?.blur?.(); } catch (e) {}
+    });
+    return () => unsub?.();
+  }, []);
+
   const [draft, setDraft] = useState('')
   const [reloading, setReloading] = useState(false)
   const listRef = useRef<HTMLDivElement>(null)
@@ -354,7 +361,7 @@ export function AiDock() {
                 <span>Canvas</span>
                 <span>Coming soon: full paint + SVG freehand</span>
               </div>
-              <div className="mt-2 aspect-[4/3] w-full overflow-hidden rounded-[6px] border border-line bg-raised/60"><canvas className="h-full w-full touch-none" /></div>
+              <div className="mt-2 aspect-[4/3] w-full overflow-hidden rounded-[6px] border border-line bg-raised/60"><canvas id="creatives-canvas" className="h-full w-full touch-none" /></div>
             </div>
             <p className="text-[11px] text-ink-3">Local-only. No network calls. Saved to exports or new files.</p>
           </div>
