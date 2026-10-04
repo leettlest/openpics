@@ -121,7 +121,8 @@
         "from": "vendor/vision",
         "to": "vision",
         "filter": [
-          "**/*"
+          "**/*.gguf",
+          "VISION-BUILD.txt"
         ]
       }
     ],

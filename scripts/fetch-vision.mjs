@@ -24,7 +24,7 @@ import { createHash } from 'node:crypto'
 import { createReadStream, createWriteStream, existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { pipeline } from 'node:stream/promises'
 import { Readable } from 'node:stream'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join, resolve, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -102,6 +102,16 @@ async function download(url, target) {
 
       const headers = have > 0 ? { Range: `bytes=${have}-` } : {}
       const response = await fetch(url, { redirect: 'follow', headers })
+
+      // 416 means the range starts past the end of the remote file, so whatever is
+      // on disk is not a usable prefix. Drop it and fetch the whole thing, rather
+      // than retrying an offset that cannot be satisfied.
+      if (response.status === 416) {
+        log('server rejected the resume offset; discarding the partial file')
+        rmSync(target, { force: true })
+        throw new Error('resume rejected: HTTP 416')
+      }
+
       if (!response.ok || !response.body) {
         throw new Error(`download failed: HTTP ${response.status} ${response.statusText}`)
       }
@@ -212,7 +222,11 @@ function statSync2(file) {
   } catch {
     size = 0
   }
-  const expected = FILES.find((f) => file.endsWith(f.filename))
+  // Matched on the exact basename, not endsWith: the projector is named
+  // "mmproj-SmolVLM-...gguf", which *ends with* the model's filename, so a suffix
+  // match resolved the projector against the model's much larger pinned size and
+  // classified a complete file as partial.
+  const expected = FILES.find((f) => basename(file) === f.filename)
   if (!expected) return 'missing'
   if (size === 0) return 'missing'
   if (size === expected.size) return 'exact'
