@@ -190,7 +190,10 @@ export async function chatAi(
     }
     messages.push({
       role: 'user',
-      content: buildVisionMessage(`${systemPrompt()}\n\n${promptText}`, images)
+      content: buildVisionMessage(
+        `${systemPrompt()}\n\nAnswer conversationally. ${promptText}`,
+        images
+      )
     })
   } else {
     messages.push({ role: 'system', content: systemPrompt() })
