@@ -40,6 +40,31 @@ npm-debug.log*
 # Local GUI probe output (screenshots + report); the harness, not its runs.
 probe/
 
+# Working notes, not documentation.
+#
+# Plans are how the work gets thought through, and they go stale the moment the
+# work lands. The UI overhaul plan sat in the tree for a full implementation
+# cycle describing a UI that now exists, and nothing referenced it - so it read
+# as current documentation while being nothing of the kind. Anything that helps
+# decide what to build belongs in the commit message or an issue, not here.
+*-plan.md
+*-plans.md
+*-notes.md
+PLAN.md
+NOTES.md
+TODO.md
+SCRATCH.md
+*.scratch.md
+
+# The same, uppercase. `.gitignore` matching is case-sensitive, and a plan
+# written as SHOUTING-NAME.md is still a plan - one of these was called
+# OPENPICS_FIX_PLAN.md and sat untracked in status forever because the rule
+# above only covered lowercase.
+*[-_]PLAN.md
+*[-_]PLAN*.md
+*[-_]NOTES*.md
+*[-_]TODO*.md
+
 # Editor and OS noise
 .DS_Store
 Thumbs.db
@@ -47,3 +72,9 @@ desktop.ini
 .vscode/
 .idea/
 *.swp
+*.swo
+*~
+*.bak
+*.orig
+*.rej
+
