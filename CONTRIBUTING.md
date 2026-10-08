@@ -16,7 +16,7 @@ Security issues do not go in issues. Read [SECURITY.md](SECURITY.md).
 Requires Node 22 or newer and npm.
 
 ```bash
-git clone https://github.com/who-lee/openpics.git
+git clone https://github.com/leettlest/openpics.git
 cd openpics
 npm install
 npm run dev

@@ -6,16 +6,16 @@
   "bin": {
     "openpics": "./bin/openpics.js"
   },
-  "author": "Hen <who-lee>",
+  "author": "Hen <leettlest>",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/who-lee/openpics.git"
+    "url": "git+https://github.com/leettlest/openpics.git"
   },
   "bugs": {
-    "url": "https://github.com/who-lee/openpics/issues"
+    "url": "https://github.com/leettlest/openpics/issues"
   },
-  "homepage": "https://github.com/who-lee/openpics#readme",
+  "homepage": "https://github.com/leettlest/openpics#readme",
   "keywords": [
     "photo",
     "picture",

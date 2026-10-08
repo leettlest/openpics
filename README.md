@@ -24,7 +24,7 @@ one thing well and keeps your pictures on your machine:
 ## Install
 
 Grab `OpenPics-1.0.0-beta.7-setup.exe` from
-[releases](https://github.com/who-lee/openpics/releases) and run it. Windows
+[releases](https://github.com/leettlest/openpics/releases) and run it. Windows
 11, x64. No installer dependencies: the PNG and JPEG codecs are part of the app,
 so there is no native image library to ship.
 
@@ -285,7 +285,7 @@ code that passes typecheck.
 Apache License 2.0. See [LICENSE](LICENSE).
 
 Commercial use is permitted. Any distribution must keep the NOTICE file and
-credit **OpenPics by Hen (Lee Muriithi Kingori, [who-lee](https://github.com/who-lee))**,
+credit **OpenPics by Hen (Lee Muriithi Kingori, [leettlest](https://github.com/leettlest))**,
 including in an About or Credits screen.
 
 The packaged application also ships FFmpeg, which is licensed separately under
@@ -295,7 +295,7 @@ See [NOTICE](NOTICE) for the full terms.
 
 ## Credits
 
-- **[OpenPics by Hen (Lee Muriithi Kingori)](https://github.com/who-lee)** ([who-lee](https://github.com/who-lee)) — design and code
+- **[OpenPics by Hen (Lee Muriithi Kingori)](https://github.com/leettlest)** ([leettlest](https://github.com/leettlest)) — design and code
 - **a cute Ai bot made this project** — assistance throughout
 - [bylestramk.org](https://bylestramk.org) — support
 - [Donate on PayPal](https://www.paypal.com/ncp/payment/QDRSPAFCKTLXE)

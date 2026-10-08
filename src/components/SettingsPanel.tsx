@@ -50,7 +50,7 @@ const SLIDESHOW_CHOICES = [
  * there is no chance of the two credit rows drifting apart from the README and
  * the package manifest.
  */
-const AUTHOR_URL = 'https://github.com/who-lee'
+const AUTHOR_URL = 'https://github.com/leettlest'
 const SITE_URL = 'https://bylestramk.org'
 const DONATE_URL = 'https://www.paypal.com/ncp/payment/QDRSPAFCKTLXE'
 
@@ -654,12 +654,12 @@ export function SettingsPanel() {
             <button
               type="button"
               onClick={() => void openUrl(AUTHOR_URL)}
-              title="Open github.com/who-lee in your browser"
+              title="Open github.com/leettlest in your browser"
               className="underline-offset-2 transition-colors duration-150 hover:text-ink hover:underline"
             >
               Lee Muriithi Kingori
             </button>
-            <span className="text-ink-3">— who-lee, built this</span>
+            <span className="text-ink-3">— leettlest, built this</span>
           </li>
           <li>
             a cute Ai bot made this project
