@@ -83,9 +83,21 @@ export function acceptSetting(target: Settings, key: keyof Settings, incoming: u
   if (typeof incoming === typeof fallback) set(target, key, incoming)
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+/**
+ * Writes one validated setting.
+ *
+ * The cast is through `Record<string, unknown>` rather than `any`, which is both
+ * narrower and lint-clean: `keyof Settings` is a union of keys whose value types
+ * differ, so no single value type can be assigned through it, but every key does
+ * accept `unknown`. A reader checking the write can still see it is going into
+ * the settings object.
+ *
+ * The previous version needed an `eslint-disable` for `any` - and the comment sat
+ * on the line above the function signature rather than the line with the cast, so
+ * it suppressed nothing and the suppression was doing no work anyway.
+ */
 function set(target: Settings, key: keyof Settings, value: unknown): void {
-  ;(target as any)[key] = value
+  ;(target as unknown as Record<string, unknown>)[key] = value
 }
 
 /**
@@ -122,8 +134,13 @@ function cleanTagRecord(raw: unknown): Record<string, string[]> {
   const out: Record<string, string[]> = {}
   for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
     if (!Array.isArray(value)) continue
-    const tags = value.filter((tag): tag is string => typeof tag === 'string' && tag.trim() !== '')
-    if (tags.length > 0) out[key] = tags
+    // Lowercased like everywhere else tags enter the system, so a hand-edited
+    // "Sunset" matches the "sunset" the filters and the model both use.
+    const tags = value
+      .filter((tag): tag is string => typeof tag === 'string' && tag.trim() !== '')
+      .map((tag) => tag.trim().toLowerCase().replace(/\s+/g, ' '))
+    const unique = [...new Set(tags)]
+    if (unique.length > 0) out[key] = unique
   }
   return out
 }

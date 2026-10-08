@@ -23,7 +23,7 @@ one thing well and keeps your pictures on your machine:
 
 ## Install
 
-Grab `OpenPics-1.0.0-beta.5-setup.exe` from
+Grab `OpenPics-1.0.0-beta.7-setup.exe` from
 [releases](https://github.com/who-lee/openpics/releases) and run it. Windows
 11, x64. No installer dependencies: the PNG and JPEG codecs are part of the app,
 so there is no native image library to ship.
@@ -62,10 +62,63 @@ The drawer keeps its scrollback while it is hidden, and its shells close with
 the window — and switching the terminal off in Settings closes the shells that
 are already open.
 
+## The pages: Library, Creatives, Settings
+
+The tabs under the title bar switch pages. **Library** is the grid. **Creatives**
+is a drawing surface: brush, eraser and freehand pen, undo and redo, PNG and
+SVG export to your downloads folder. Strokes survive tab switches and restarts.
+Drawing itself needs a mouse, pen, or touch; every toolbar control works from
+the keyboard. **Settings** replaces the library rather than covering it; Escape
+or the Library tab takes you back.
+
+## The AI assistant
+
+The dock on the right of the grid holds three views: **Chat**, **Tags**, and
+**Similar**. Everything runs on this machine, on a bundled local model.
+
+Chat answers about your library and can act on it: find photos, read file
+details and the Recycle Bin, set a wallpaper, open files. It only ever touches
+a path from the search results or from the files you selected — anything else
+is refused. Long answers can be stopped, failed ones retried. The dock
+collapses to a rail, remembers its width, and resizes by drag, arrow keys, or
+double-click to reset.
+
+Two honest limits. The assistant sees the first 2,000 loaded entries, and says
+so when your library is bigger ("counted the first 2,000 of 9,000") rather than
+claiming a full count. And when photos are attached, it describes what it sees
+without tools — the vision model cannot call them, and it says that instead of
+promising searches it cannot run.
+
+**Tags** suggests tags for the selection from the pictures themselves.
+**Similar** finds look-alikes of a photo by perceptual hash. Both are local.
+
+Settings holds the **Assistant model** picker (which `.gguf` answers, warmed
+before it reports ready) and the **Assistant prompt** editor. Your prompt edits
+are kept as written and never overwritten; clearing the prompt restores the
+default.
+
+## The command line
+
+An installed copy registers the `openpics` command:
+
+```text
+openpics [files or folders] [--chat]
+openpics --help
+openpics --version
+```
+
+Files open in the viewer, folders become the library root, and `--chat` opens
+the assistant with the composer focused. A second invocation while the app runs
+hands its arguments to the running instance instead of starting a duplicate.
+`--help` and `--version` answer without launching anything.
+
 ## Video
 
 Clips are listed alongside pictures and open in the same viewer, which plays
-them with the usual controls.
+them with its own controls: play, ten-second jumps, frame stepping, speed,
+volume, loop, and fullscreen, plus a seek bar with a hover preview. `K` plays,
+`J` and `L` jump, `,` and `.` step one frame. Space stays the slideshow's, so
+the two never fight over one key.
 
 MP4, WebM, MOV, OGV and 3GP play in the viewer. FLV, WMV, MPEG and MPEG-TS are
 listed and open in whatever your system uses instead, because Chromium has no
@@ -109,8 +162,11 @@ npm run mcp
 Exposes `photos_find`, `photos_describe`, `edit_cutout_auto`, `edit_brush`,
 `edit_output`, `edit_preview`, `edit_apply`, `edit_inspect`, `video_addons`,
 `video_probe`, `video_trim`, `video_split`, `video_concat`, `video_frame`,
-`video_filter`, `wallpaper_get`, `wallpaper_set`, and a recycle bin
-(`bin_list`, `bin_send`, `bin_restore`, `bin_purge`, `bin_empty`).
+`video_filter`, `wallpaper_get`, `wallpaper_set`, a recycle bin
+(`bin_list`, `bin_send`, `bin_restore`, `bin_purge`, `bin_empty`), and the
+Creatives drawing tools (`creatives_list`, `creatives_draw`, `creatives_shape`,
+`creatives_text`, `creatives_undo`, `creatives_delete`, `creatives_clear`),
+which edit the same drawing the app shows, live.
 
 `edit_output` and the four writing video tools take a `filter`, named from the
 shared catalogue. `edit_output` holds it between calls, so null turns it off
@@ -123,13 +179,14 @@ agent cannot be talked into running a flag that was not designed for.
 Deletes go to a bin rather than unlinking, so a wrong agent call is
 recoverable. `bin_purge` is the destructive one and is named accordingly.
 
-The tools can be turned off from the app, under Settings → Agent (MCP). Turning
+The tools can be turned off from the app, under Settings → Agent tools. Turning
 **Allow agent tools** off makes every tool refuse with an explanation, including
-the ones that only read. The server re-reads that setting on every call rather
-than once at startup, so a switch flipped while an agent is mid-session takes
-effect immediately. An agent that launched the server before you switched it off
-cannot be revoked from the app — it holds the process — so the setting is the
-floor, not the ceiling.
+the ones that only read, and tag suggestions are refused too. Similarity search
+keeps working: it is local arithmetic with no model involved. The server
+re-reads that setting on every call rather than once at startup, so a switch
+flipped while an agent is mid-session takes effect immediately. An agent that
+launched the server before you switched it off cannot be revoked from the
+app — it holds the process — so the setting is the floor, not the ceiling.
 
 Point an agent at it by adding the command to your MCP client config:
 
@@ -150,6 +207,9 @@ Point an agent at it by adding the command to your MCP client config:
 npm install
 npm run dev         # run from source
 npm run typecheck   # node, web, and mcp projects
+npm test            # 14 suites, headless; needs a build first for dist-test
+npm run test:file -- <name>  # one suite, e.g. dock-width (see --list)
+npm run probe       # drives the built app like a user (needs a screen)
 npm run addons      # download FFmpeg into vendor/ (also run by prepackage)
 npm run build       # bundle to out/
 npm run package:dir # unpacked build in release/win-unpacked
@@ -196,6 +256,8 @@ electron/   main process, preload bridge, filesystem scanner
 shared/     wire types shared by all three layers
 src/        React renderer
 mcp/        Model Context Protocol server over core/
+tests/      headless suites over core/ and shared/ (npm test)
+scripts/    fetch scripts, the gui-probe harness, and the single-suite runner
 ```
 
 `core/` is deliberately free of Electron imports. That is what lets the MCP

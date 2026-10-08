@@ -1,6 +1,6 @@
 import { app } from 'electron'
 import { existsSync, mkdirSync, readdirSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { join, resolve } from 'node:path'
 
 export function getUserDataDir(): string {
   return app.getPath('userData')

@@ -1,41 +1,58 @@
-import { useCallback, useEffect } from 'react'
-import { ArrowLeft } from '@phosphor-icons/react'
+import { useCallback, useEffect, useState } from 'react'
 import { Titlebar } from './components/Titlebar'
+import { TopTabs } from './components/TopTabs'
 import { Toolbar } from './components/Toolbar'
 import { Breadcrumbs } from './components/Breadcrumbs'
 import { FilterBar } from './components/FilterBar'
 import { Grid } from './components/Grid'
 import { AiDock } from './components/AiDock'
+import { Creatives } from './components/Creatives'
 import { Viewer } from './components/Viewer'
 import { StatusBar } from './components/StatusBar'
 import { ShortcutsOverlay } from './components/ShortcutsOverlay'
 import { SettingsPanel } from './components/SettingsPanel'
 import { TerminalPanel } from './components/TerminalPanel'
-import { useAiDeltaSubscription, useLibrary, useOpenFilesSubscription } from './store/library'
+import {
+  useAiDeltaSubscription,
+  useAiToolSubscription,
+  useLibrary,
+  useOpenChatSubscription,
+  useOpenFilesSubscription,
+  useOpenFoldersSubscription
+} from './store/library'
 import { bridge } from './lib/bridge'
 
 export default function App() {
-  const {
-    boot,
-    settings,
-    showSettings,
-    setShowSettings,
-    step,
-    toggleInfo,
-    toggleShortcuts,
-    toggleSlideshow,
-    toggleTerminal,
-    selectAll,
-    invertSelection,
-    toggleAi,
-    open,
-    cursor,
-    select,
-    moveCursor,
-    setQuery,
-    rescan,
-    pickFolder
-  } = useLibrary()
+  // One selector per field, not a bare `useLibrary()`. The bare form returns the
+  // whole state object, and zustand rebuilds that object on every `set`, so this
+  // component - the root of the tree - re-rendered on every store write and
+  // took every unmemoised child with it. That includes `appendAiDelta`, which
+  // fires once per streamed token, and the scan progress write, which fires
+  // about every 120ms. The actions below never change identity, so subscribing
+  // to each individually costs nothing and only the three real state reads
+  // (`settings`, `showSettings`, `showCreatives`) can re-render this component.
+  // AiDock.tsx carries the same note for the same reason.
+  const boot = useLibrary((s) => s.boot)
+  const settings = useLibrary((s) => s.settings)
+  const showSettings = useLibrary((s) => s.showSettings)
+  const showCreatives = useLibrary((s) => s.showCreatives)
+  const setShowSettings = useLibrary((s) => s.setShowSettings)
+  const setShowCreatives = useLibrary((s) => s.setShowCreatives)
+  const step = useLibrary((s) => s.step)
+  const toggleInfo = useLibrary((s) => s.toggleInfo)
+  const toggleShortcuts = useLibrary((s) => s.toggleShortcuts)
+  const toggleSlideshow = useLibrary((s) => s.toggleSlideshow)
+  const toggleTerminal = useLibrary((s) => s.toggleTerminal)
+  const selectAll = useLibrary((s) => s.selectAll)
+  const invertSelection = useLibrary((s) => s.invertSelection)
+  const toggleAi = useLibrary((s) => s.toggleAi)
+  const open = useLibrary((s) => s.open)
+  const cursor = useLibrary((s) => s.cursor)
+  const select = useLibrary((s) => s.select)
+  const moveCursor = useLibrary((s) => s.moveCursor)
+  const setQuery = useLibrary((s) => s.setQuery)
+  const rescan = useLibrary((s) => s.rescan)
+  const pickFolder = useLibrary((s) => s.pickFolder)
 
   useEffect(() => {
     void boot()
@@ -45,10 +62,23 @@ export default function App() {
   // finished, so the subscription is owned here rather than by a child.
   useOpenFilesSubscription()
 
+  // Folders arrive the same way, on their own channel so file hand-off keeps
+  // its open-the-file meaning instead of gaining a second one.
+  useOpenFoldersSubscription()
+
   // Streamed AI reply pieces are appended to the dock's last message.
   useAiDeltaSubscription()
 
+  // Which tool the assistant is running, for the gap where no text is arriving.
+  useAiToolSubscription()
+
+  // Outside requests to open the chat (CLI --chat). Owned here because the dock
+  // unmounts on the Settings and Creatives pages, and a request that arrives
+  // there still has to land on the library first.
+  useOpenChatSubscription()
+
   const onDismissSettings = useCallback(() => setShowSettings(false), [setShowSettings])
+  const onDismissCreatives = useCallback(() => setShowCreatives(false), [setShowCreatives])
 
   // Theme lives on the document element so both the UI and the native caption
   // overlay can read it, rather than duplicating the tokens in JS.
@@ -132,13 +162,13 @@ export default function App() {
 
       if (useLibrary.getState().openIndex !== null) return
 
-      // Settings is a page now, not a dialog over the grid, so nothing here is
-      // modal about it. But the library it replaced is unmounted, so arrows would
-      // move a cursor nothing can see and keys like space would start a slideshow
-      // over a selection the user cannot see. While it is up, only the modifier
-      // shortcuts above and Back apply; everything else belongs to the page.
+      // Settings and Creatives are pages now, not dialogs over the grid, so nothing
+      // here is modal about them. But the library they replaced is unmounted, so
+      // arrows would move a cursor nothing can see and keys like space would start
+      // a slideshow over a selection the user cannot see. While one is up, only the
+      // modifier shortcuts above and Back apply; everything else belongs to the page.
       // Escape is handled by the listener below, not here.
-      if (useLibrary.getState().showSettings) return
+      if (useLibrary.getState().showSettings || useLibrary.getState().showCreatives) return
 
       switch (event.key) {
         case 'ArrowRight':
@@ -216,54 +246,64 @@ export default function App() {
     setQuery
   ])
 
-  // Escape leaves Settings. It is handled here rather than only in the page's own
-  // header so that the habit of Escape-means-back carries over from the dialog
-  // this replaced, and the grid handler above stops at the settings branch rather
-  // than also clearing the filter behind it.
+  // Escape leaves whichever page replaced the library. It is handled here rather
+  // than only in each page's own header so the habit of Escape-means-back carries
+  // over from the dialog this replaced, and so the grid handler above stops at the
+  // page branch rather than also clearing the filter behind it.
+  const onPage = showSettings ? 'settings' : showCreatives ? 'creatives' : null
+
+  // See the note at the render: Creatives stays mounted after its first visit.
+  const [creativesMounted, setCreativesMounted] = useState(showCreatives)
   useEffect(() => {
-    if (!showSettings) return
+    if (showCreatives) setCreativesMounted(true)
+  }, [showCreatives])
+
+  useEffect(() => {
+    if (onPage === null) return
     const onKey = (event: KeyboardEvent): void => {
       if (event.key !== 'Escape') return
       // Inside a field, Escape has to mean "stop editing", not "leave the page".
       const target = event.target as HTMLElement | null
-      if (target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA') return
+      if (
+        target?.tagName === 'INPUT' ||
+        target?.tagName === 'TEXTAREA' ||
+        target?.tagName === 'SELECT' ||
+        target?.isContentEditable
+      ) {
+        return
+      }
       event.preventDefault()
-      onDismissSettings()
+      if (onPage === 'settings') onDismissSettings()
+      else onDismissCreatives()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [showSettings, onDismissSettings])
+  }, [onPage, onDismissSettings, onDismissCreatives])
 
   return (
     <div className="flex h-full flex-col bg-base">
       <Titlebar />
-      {showSettings ? (
+      <TopTabs />
+
+      {showSettings && (
         // Settings replaces the library rather than covering it. Keeping the grid
         // mounted underneath would leave it scrolling and selectable through a
         // "modal" that no longer looks like one, and the panel is tall enough that
         // a floating card either clipped its own content or covered the whole window.
-        <>
-          <header className="flex shrink-0 items-center gap-2 border-b border-line px-3 py-2">
-            <button
-              type="button"
-              onClick={onDismissSettings}
-              className="flex items-center gap-1.5 rounded-[6px] px-2 py-1 text-[12px] text-ink-2 transition-colors duration-150 hover:bg-tint hover:text-ink"
-            >
-              <ArrowLeft size={14} weight="bold" aria-hidden />
-              Library
-            </button>
-            <h1 className="text-[13px] font-semibold text-ink">Settings</h1>
-          </header>
-          <div className="min-h-0 flex-1 overflow-y-auto">
-            <SettingsPanel />
-          </div>
-        </>
-      ) : (
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          <SettingsPanel />
+        </div>
+      )}
+
+      {!showSettings && !showCreatives && (
         <>
           <Toolbar />
           <Breadcrumbs />
           <FilterBar />
-          <div className="flex min-h-0 flex-1">
+          {/* min-w-0 is load-bearing: without it the grid refuses to give up any
+              width, so the dock's remembered width pushes it off screen instead of
+              taking space from it. */}
+          <div className="flex min-h-0 min-w-0 flex-1">
             <Grid />
             <AiDock />
           </div>
@@ -271,6 +311,17 @@ export default function App() {
           <StatusBar />
           <Viewer />
         </>
+      )}
+
+      {creativesMounted && (
+        // Hidden, not unmounted, once it has been opened: the strokes live in
+        // component state, so tearing the canvas down on a tab switch throws away
+        // whatever was being drawn. The first mount waits for the page to be on
+        // screen, because a canvas sized while display:none has no width to measure
+        // and would come up blank.
+        <div className={showCreatives ? 'min-h-0 flex-1 overflow-hidden' : 'hidden'}>
+          <Creatives />
+        </div>
       )}
       <ShortcutsOverlay />
     </div>

@@ -15,11 +15,10 @@
  */
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { dirname, join } from 'node:path'
+import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { deflateSync } from 'node:zlib'
 
-const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const EDITING = new URL('../dist-test/electron/editing.js', import.meta.url).href
 if (!existsSync(fileURLToPath(new URL('../dist-test/electron/editing.js', import.meta.url)))) {
   console.error('the test build is missing: dist-test/electron/editing.js\nrun "npm run build:test" first, or use "npm test".')
@@ -389,7 +388,7 @@ try {
     const r = read(out)
     const [, , , outsideAlpha] = pixel(r, 0, 0)
     check('the background is still removable', outsideAlpha === 0, `alpha ${outsideAlpha}`)
-    const [sr, sg, sb, sa] = pixel(r, 25, 20)
+    const [sr, sg, , sa] = pixel(r, 25, 20)
     check('the subject is still intact', sr === 220 && sg === 30 && sa === 255, `${sr},${sg},${sa}`)
     handleClose(id)
   }

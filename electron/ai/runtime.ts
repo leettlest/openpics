@@ -19,13 +19,13 @@ import { createServer } from 'node:net'
 import { existsSync } from 'node:fs'
 import { cpus } from 'node:os'
 import { getLlamaDir, getLlamaServerPath } from './paths'
-import type { ChatContentPart } from '../../shared/ai-vision'
+import type { AiToolSpec } from '../../core/ai-tools'
+import { StreamAssembler, toWireMessages, type ChatMessage, type ChatResult, type ToolCall } from '../../core/ai-wire'
 
-export type ChatMessage = {
-  role: 'system' | 'user' | 'assistant'
-  /** A string for text turns, or OpenAI-style parts when images are attached. */
-  content: string | ChatContentPart[]
-}
+// The message shape and the stream parser live in core/ai-wire.ts, where the
+// tests can reach them; they are re-exported here because callers already import
+// them from this file.
+export type { ChatMessage, ChatResult, ToolCall }
 
 export type ChatOptions = {
   messages: ChatMessage[]
@@ -33,6 +33,25 @@ export type ChatOptions = {
   temperature?: number
   /** When set, the server is started with this projector so it can read images. */
   mmprojPath?: string
+  /**
+   * Function schemas the model may call. Omitted entirely when there is nothing
+   * to offer: sending an empty array makes some templates believe tools exist
+   * and exist in a form it cannot satisfy.
+   */
+  tools?: AiToolSpec[]
+  /**
+   * Cancels the HTTP stream and, through the callers, the tool loop. The signal
+   * is how the Stop button reaches a generation that is already on the wire.
+   */
+  signal?: AbortSignal
+}
+
+/** Thrown when the user stops a request rather than when the request fails. */
+export class ChatCancelledError extends Error {
+  constructor() {
+    super('The chat request was cancelled.')
+    this.name = 'ChatCancelledError'
+  }
 }
 
 /** How often the watchdog checks the resident server is still healthy. */
@@ -276,27 +295,48 @@ export async function ensureRuntime(modelPath: string, mmprojPath?: string): Pro
 /**
  * Streams a completion, invoking `onDelta` as text arrives.
  *
- * Returns the full reply once the stream ends. Deltas are what make the dock feel
- * alive; the return value is what the store settles on so a dropped delta cannot
- * leave a half-written answer on screen.
+ * Returns the text plus any tool calls the model asked for. Deltas are what make
+ * the dock feel alive; the return value is what the store settles on so a dropped
+ * delta cannot leave a half-written answer on screen.
+ *
+ * Tool calls arrive as fragments in the same stream as the text: the name once,
+ * then the JSON arguments a few characters at a time, tagged by index. They are
+ * accumulated here rather than in the caller so that the shape of the wire
+ * protocol stops at this file.
  */
-export async function chat(
+export async function chatWithTools(
   modelPath: string,
   options: ChatOptions,
-  onDelta: (delta: string) => void
-): Promise<string> {
+  onDelta: (delta: string) => void,
+  signal: AbortSignal | undefined = options.signal
+): Promise<ChatResult> {
   const serverPort = await ensureRuntime(modelPath, options.mmprojPath)
+  if (signal?.aborted) throw new ChatCancelledError()
+  const tools = options.tools ?? []
 
-  const response = await fetch(`http://127.0.0.1:${serverPort}/v1/chat/completions`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      messages: options.messages,
-      max_tokens: options.maxTokens ?? 512,
-      temperature: options.temperature ?? 0.7,
-      stream: true
+  let response: Response
+  try {
+    response = await fetch(`http://127.0.0.1:${serverPort}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        // Not the internal objects: `toWireMessages` renames the tool fields into
+        // the snake_case the API reads. See core/ai-wire.ts for why that has to
+        // happen here rather than being left to the JSON.
+        messages: toWireMessages(options.messages),
+        max_tokens: options.maxTokens ?? 512,
+        temperature: options.temperature ?? 0.7,
+        stream: true,
+        ...(tools.length > 0 ? { tools, tool_choice: 'auto' } : {})
+      }),
+      signal
     })
-  })
+  } catch (err) {
+    if (signal?.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
+      throw new ChatCancelledError()
+    }
+    throw err
+  }
 
   if (!response.ok || !response.body) {
     const detail = await response.text().catch(() => '')
@@ -306,49 +346,69 @@ export async function chat(
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
-  let full = ''
+  const assembler = new StreamAssembler(onDelta)
 
+  // Returns true once the stream has ended, so the read loop can stop early.
   const consume = (line: string): boolean => {
-    if (!line.startsWith('data:')) return false
-    const payload = line.slice(5).trim()
-    if (payload === '' || payload === '[DONE]') return payload === '[DONE]'
-    try {
-      const parsed = JSON.parse(payload) as {
-        choices?: Array<{ delta?: { content?: string }; text?: string }>
-      }
-      const choice = parsed.choices?.[0]
-      const piece = choice?.delta?.content ?? choice?.text ?? ''
-      if (piece) {
-        full += piece
-        onDelta(piece)
-      }
-    } catch {
-      // A partial SSE frame; the next read completes it.
-    }
+    const trimmed = line.trim()
+    if (trimmed.startsWith('data:') && trimmed.slice(5).trim() === '[DONE]') return true
+    assembler.push(line)
     return false
   }
 
-  let done = false
-  while (!done) {
-    const { value, done: finished } = await reader.read()
-    if (finished) break
-    buffer += decoder.decode(value, { stream: true })
-    let newline = buffer.indexOf('\n')
-    while (newline !== -1) {
-      const line = buffer.slice(0, newline).replace(/\r$/, '')
-      buffer = buffer.slice(newline + 1)
-      if (consume(line)) {
-        done = true
-        break
+  try {
+    let done = false
+    while (!done) {
+      if (signal?.aborted) {
+        await reader.cancel().catch(() => {})
+        throw new ChatCancelledError()
       }
-      newline = buffer.indexOf('\n')
+      const { value, done: finished } = await reader.read()
+      if (finished) break
+      buffer += decoder.decode(value, { stream: true })
+      let newline = buffer.indexOf('\n')
+      while (newline !== -1) {
+        const line = buffer.slice(0, newline).replace(/\r$/, '')
+        buffer = buffer.slice(newline + 1)
+        if (consume(line)) {
+          done = true
+          break
+        }
+        newline = buffer.indexOf('\n')
+      }
     }
+  } catch (err) {
+    await reader.cancel().catch(() => {})
+    if (signal?.aborted || err instanceof ChatCancelledError || (err instanceof DOMException && err.name === 'AbortError')) {
+      throw new ChatCancelledError()
+    }
+    throw err
   }
-  if (buffer.trim() !== '') {
+  // A server that closes without sending [DONE] still leaves a last frame sitting
+  // in the buffer, so the tail is drained rather than dropped.
+  if (!signal?.aborted && buffer.trim() !== '') {
     for (const line of buffer.split('\n')) consume(line.replace(/\r$/, ''))
   }
+  if (signal?.aborted) throw new ChatCancelledError()
 
-  return full
+  return assembler.result()
+}
+
+/**
+ * Chat without tools, for the callers that only ever want text.
+ *
+ * Autotagging and the vision path both want a completion, not a conversation, and
+ * giving them the tool loop would mean a picture caption could turn into a
+ * wallpaper change.
+ */
+export async function chat(
+  modelPath: string,
+  options: ChatOptions,
+  onDelta: (delta: string) => void,
+  signal: AbortSignal | undefined = options.signal
+): Promise<string> {
+  const result = await chatWithTools(modelPath, options, onDelta, signal)
+  return result.text
 }
 
 /** Kill the child and forget it, without touching the keep-alive intent. */

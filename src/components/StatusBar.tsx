@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useLibrary } from '@/store/library'
 import { bridge } from '@/lib/bridge'
 import type { ThumbnailStats } from '@shared/protocol'
 import { formatCount } from '@/lib/format'
+import { useMediaQuery } from '@/lib/useMediaQuery'
 
 export function StatusBar() {
   const photos = useLibrary((s) => s.photos)
@@ -10,16 +11,43 @@ export function StatusBar() {
   const status = useLibrary((s) => s.status)
   const info = useLibrary((s) => s.scanInfo)
   const progress = useLibrary((s) => s.progress)
+  const viewerOpen = useLibrary((s) => s.openIndex !== null)
   const [stats, setStats] = useState<ThumbnailStats | null>(null)
+  // Hints are the first thing to go on a narrow window. Rendered, not
+  // class-toggled, for the same reason as the toolbar overflow menu.
+  const compact = useMediaQuery('(max-width: 900px)')
 
+  // The cache count only moves while thumbnails are being made - during a scan
+  // or with the viewer open - so polling it every 1.5s forever was IPC for a
+  // number that could not change. One read on mount, then poll only while it
+  // can move, at half the old rate.
+  const polling = status === 'scanning' || viewerOpen
   useEffect(() => {
+    let live = true
+    void bridge.library
+      .thumbStats()
+      .then((fresh) => {
+        if (live) setStats(fresh)
+      })
+      .catch(() => {})
+    if (!polling) return
     const id = window.setInterval(() => {
-      void bridge.library.thumbStats().then(setStats)
-    }, 1500)
-    return () => window.clearInterval(id)
-  }, [])
+      void bridge.library
+        .thumbStats()
+        .then((fresh) => {
+          if (live) setStats(fresh)
+        })
+        .catch(() => {})
+    }, 3000)
+    return () => {
+      live = false
+      window.clearInterval(id)
+    }
+  }, [polling])
 
-  const totalBytes = photos.reduce((sum, photo) => sum + photo.bytes, 0)
+  // Summing tens of thousands of sizes on every render - cursor moves included -
+  // for a number that only changes when the photo list does.
+  const totalBytes = useMemo(() => photos.reduce((sum, photo) => sum + photo.bytes, 0), [photos])
   const notes: string[] = []
 
   if (status === 'scanning' && progress) {
@@ -54,18 +82,22 @@ export function StatusBar() {
         <span className="num truncate text-[11px] text-ink-3">{notes.join('  |  ')}</span>
       ) : null}
       <span className="ml-auto flex items-center gap-3 text-[11px] text-ink-3">
-        <span>
-          <kbd className="num">Space</kbd> select
-        </span>
-        <span>
-          <kbd className="num">Enter</kbd> open
-        </span>
-        <span>
-          <kbd className="num">S</kbd> slideshow
-        </span>
-        <span>
-          <kbd className="num">Ctrl+H</kbd> hide
-        </span>
+        {compact ? null : (
+          <>
+            <span>
+              <kbd className="num">Space</kbd> select
+            </span>
+            <span>
+              <kbd className="num">Enter</kbd> open
+            </span>
+            <span>
+              <kbd className="num">S</kbd> slideshow
+            </span>
+            <span>
+              <kbd className="num">Ctrl+H</kbd> hide
+            </span>
+          </>
+        )}
       </span>
     </footer>
   )

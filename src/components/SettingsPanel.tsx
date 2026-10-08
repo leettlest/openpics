@@ -12,7 +12,8 @@ import { useEffect, useState } from 'react'
 import { bridge } from '@/lib/bridge'
 import { useLibrary } from '@/store/library'
 import type { AddonStatus } from '@shared/addons'
-import { Segmented, Toggle } from './ui'
+import type { AiModelInfo } from '@shared/ai-types'
+import { Button, Segmented, Toggle } from './ui'
 
 /**
  * Slideshow speeds, in seconds.
@@ -144,6 +145,24 @@ export function SettingsPanel() {
   const [addons, setAddons] = useState<AddonStatus[] | null>(null)
   const [reprobing, setReprobing] = useState(false)
 
+  /**
+   * Assistant model and prompt.
+   *
+   * `null` while loading, which is distinct from an empty model list: no models
+   * found is a finding ("drop a .gguf in the folder"), while still-loading is
+   * not. Switching warms the new weights before reporting ready, so choosing a
+   * model takes seconds and the section says so instead of going quiet.
+   */
+  const [models, setModels] = useState<AiModelInfo[] | null>(null)
+  const [activeModel, setActiveModel] = useState<string | null>(null)
+  const [modelReady, setModelReady] = useState(false)
+  const [switchingModel, setSwitchingModel] = useState(false)
+  const [modelError, setModelError] = useState<string | null>(null)
+  const [promptPath, setPromptPath] = useState<string | null>(null)
+  const [promptText, setPromptText] = useState<string | null>(null)
+  const [savingPrompt, setSavingPrompt] = useState(false)
+  const [promptError, setPromptError] = useState<string | null>(null)
+
   useEffect(() => {
     let live = true
     void bridge.shell
@@ -225,6 +244,80 @@ export function SettingsPanel() {
       /* keep the previous answer; a failed refresh is not new information */
     } finally {
       setReprobing(false)
+    }
+  }
+
+  // Asked once, on open: which models are on disk, which one is answering, and
+  // what the prompt file currently says. All three are main-process truth rather
+  // than mirrored settings, so a model dropped into the folder while the app was
+  // running shows up here instead of after a restart.
+  useEffect(() => {
+    let live = true
+    void bridge.ai
+      .listModels()
+      .then((list) => {
+        if (live) setModels(list)
+      })
+      .catch(() => {
+        if (live) setModels([])
+      })
+    void bridge.ai
+      .state()
+      .then((state) => {
+        if (live) {
+          setActiveModel(state.modelPath)
+          setModelReady(state.ready)
+        }
+      })
+      .catch(() => {})
+    void bridge.ai
+      .getPrompt()
+      .then((prompt) => {
+        if (live) {
+          setPromptPath(prompt.path)
+          setPromptText(prompt.content)
+        }
+      })
+      .catch(() => {
+        if (live) setPromptText('')
+      })
+    return () => {
+      live = false
+    }
+  }, [])
+
+  const switchModel = async (path: string): Promise<void> => {
+    setSwitchingModel(true)
+    setModelError(null)
+    try {
+      const state = await bridge.ai.setModel(path)
+      setActiveModel(state.modelPath)
+      setModelReady(state.ready)
+      // The dock keeps its own ready flag from boot, so tell it the model
+      // changed rather than leaving it describing the old one.
+      useLibrary.setState({ aiModelReady: state.ready, aiVisionReady: state.visionReady })
+      if (!state.ready) {
+        setModelError(state.lastError ?? 'The model could not be started.')
+      }
+    } catch (error) {
+      setModelError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setSwitchingModel(false)
+    }
+  }
+
+  const savePrompt = async (): Promise<void> => {
+    if (promptText === null) return
+    setSavingPrompt(true)
+    setPromptError(null)
+    try {
+      const saved = await bridge.ai.setPrompt(promptText)
+      setPromptPath(saved.path)
+      setPromptText(saved.content)
+    } catch (error) {
+      setPromptError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setSavingPrompt(false)
     }
   }
 
@@ -355,18 +448,20 @@ export function SettingsPanel() {
       </section>
 
       <section>
-        <h2 className="text-[13px] font-semibold text-ink">Agent (MCP)</h2>
+        <h2 className="text-[13px] font-semibold text-ink">Agent tools</h2>
         <div className="mt-2 flex items-start justify-between gap-4">
           <div className="min-w-0">
             <p className="text-[12px] leading-[1.5] text-ink-2">
-              Lets a coding agent drive OpenPics over the Model Context Protocol: find pictures,
-              describe them, remove backgrounds, and file things into the Recycle Bin. Turning this
-              off makes every one of those tools refuse.
+              Lets software act on this library. The assistant in the AI dock uses it to find and open pictures, read
+              the Recycle Bin, and set a wallpaper; a coding agent can reach the same tools over the Model Context
+              Protocol. Turning this off makes every one of those tools refuse, and tag suggestions are refused too,
+              because they send pictures to the model and write tags. Similarity search keeps working: it is local
+              arithmetic with no model involved.
             </p>
             <p className="num mt-1 text-[11px] text-ink-3">
               {settings.enableMcp
-                ? 'agent tools allowed'
-                : 'agent tools blocked for this profile'}
+                ? 'dock and MCP tools allowed'
+                : 'dock and MCP tools blocked for this profile'}
             </p>
           </div>
           <Toggle
@@ -376,6 +471,88 @@ export function SettingsPanel() {
               void patch({ enableMcp: value })
             }}
           />
+        </div>
+      </section>
+
+      <section>
+        <h2 className="text-[13px] font-semibold text-ink">Assistant model</h2>
+        <div className="mt-2 flex flex-col gap-2">
+          <p className="text-[12px] leading-[1.5] text-ink-2">
+            Which local model answers in the AI dock. Switching loads the new weights first, so it takes a few
+            seconds and the dock keeps working on the old one until then.
+          </p>
+          {models === null ? (
+            <p className="text-[12px] text-ink-3">Looking for models…</p>
+          ) : models.length === 0 ? (
+            <p className="text-[12px] text-ink-2">
+              No model files found. Drop a .gguf file in the bundled models folder and reopen Settings.
+            </p>
+          ) : (
+            <label className="flex items-center gap-2 text-[12px] text-ink-2">
+              Model
+              <select
+                value={activeModel ?? ''}
+                disabled={switchingModel}
+                onChange={(event) => void switchModel(event.target.value)}
+                aria-label="Assistant model"
+                className="min-w-0 flex-1 rounded-[6px] border border-line bg-raised px-2 py-1.5 text-[12px] text-ink focus:border-line-strong focus:outline-none disabled:opacity-50"
+              >
+                {activeModel !== null && !models.some((m) => m.path === activeModel) ? (
+                  <option value={activeModel}>Current file (no longer on disk)</option>
+                ) : null}
+                {models.map((model) => (
+                  <option key={model.path} value={model.path}>
+                    {model.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          <p className="num text-[11px] text-ink-3">
+            {switchingModel ? 'Loading the new model…' : modelReady ? 'Model ready' : 'No model ready'}
+          </p>
+          {modelError ? <p className="text-[12px] text-ink-2">{modelError}</p> : null}
+        </div>
+      </section>
+
+      <section>
+        <h2 className="text-[13px] font-semibold text-ink">Assistant prompt</h2>
+        <div className="mt-2 flex flex-col gap-2">
+          <p className="text-[12px] leading-[1.5] text-ink-2">
+            The instruction the assistant reads before every answer. Edits are kept as written and never overwritten
+            by updates; clearing it restores the default.
+          </p>
+          {promptText === null ? (
+            <p className="text-[12px] text-ink-3">Reading the prompt file…</p>
+          ) : (
+            <>
+              <textarea
+                value={promptText}
+                onChange={(event) => setPromptText(event.target.value)}
+                rows={8}
+                spellCheck={false}
+                aria-label="Assistant prompt"
+                className="min-h-[160px] w-full resize-y rounded-[8px] border border-line bg-raised px-2.5 py-2 font-mono text-[11px] leading-relaxed text-ink focus:border-line-strong focus:outline-none"
+              />
+              <div className="flex items-center gap-2">
+                <Button size="sm" variant="solid" disabled={savingPrompt} onClick={() => void savePrompt()}>
+                  {savingPrompt ? 'Saving…' : 'Save prompt'}
+                </Button>
+                {promptPath ? <span className="num min-w-0 flex-1 truncate text-[11px] text-ink-3">{promptPath}</span> : null}
+              </div>
+              {/*
+                The model reads this plus the recent chat plus the library list
+                inside one fixed context window, so a very long prompt does not
+                fail loudly - it quietly squeezes out the history and the tools'
+                room to answer. The count makes that visible instead of silent.
+              */}
+              <p className="num text-[11px] text-ink-3">
+                {promptText.length.toLocaleString()} characters
+                {promptText.length > 6000 ? ' · long prompts leave the model less room for your library and history' : null}
+              </p>
+            </>
+          )}
+          {promptError ? <p className="text-[12px] text-ink-2">{promptError}</p> : null}
         </div>
       </section>
 
@@ -468,6 +645,9 @@ export function SettingsPanel() {
 
       <section>
         <h2 className="text-[13px] font-semibold text-ink">Credits</h2>
+        <p className="font-byline mt-1 text-[22px] font-bold leading-none text-ink" aria-label="OpenPics by lestramk">
+          by lestramk
+        </p>
         <ul className="mt-1.5 flex flex-col gap-1 text-[12px] text-ink-2">
           <li className="flex items-center gap-1.5">
             <GithubLogo size={13} weight="fill" className="shrink-0 text-ink-3" aria-hidden="true" />

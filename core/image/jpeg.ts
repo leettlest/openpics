@@ -454,7 +454,7 @@ class JpegDecoder {
         this.bitCount += 8
         continue
       }
-      let byte = this.buf[this.pos++]!
+      const byte = this.buf[this.pos++]!
       if (byte === 0xff) {
         const next = this.buf[this.pos]
         if (next === 0x00) {

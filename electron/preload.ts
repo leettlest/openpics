@@ -1,9 +1,14 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 import type { OpenPicsBridge } from '../shared/bridge'
+import type { AiChatContext } from '../shared/ai-types'
 import {
-  AI_DELTA_CHANNEL,
+AI_DELTA_CHANNEL,
+  AI_TOOL_CHANNEL,
   COMMAND_CHANNEL,
+  CREATIVES_CHANGED_CHANNEL,
+  OPEN_CHAT_CHANNEL,
   OPEN_FILES_CHANNEL,
+  OPEN_FOLDERS_CHANNEL,
   SCAN_PROGRESS_CHANNEL,
   TERMINAL_DATA_CHANNEL,
   TERMINAL_EXIT_CHANNEL
@@ -35,6 +40,17 @@ ipcRenderer.on(OPEN_FILES_CHANNEL, (_event, paths: string[]) => {
   else pendingFiles.push(paths)
 })
 
+// Folder hand-off, buffered the same way. No `renderer-ready` invoke here: the
+// files subscription above always sends it, and main flushes both queues on it,
+// so a second announce would only race the first.
+const pendingFolders: string[][] = []
+let openFoldersHandler: ((folders: string[]) => void) | null = null
+
+ipcRenderer.on(OPEN_FOLDERS_CHANNEL, (_event, folders: string[]) => {
+  if (openFoldersHandler) openFoldersHandler(folders)
+  else pendingFolders.push(folders)
+})
+
 const bridge: OpenPicsBridge = {
   settings: {
     get: () => ipcRenderer.invoke('settings:get'),
@@ -62,7 +78,19 @@ const bridge: OpenPicsBridge = {
       return () => {
         if (openFilesHandler === handler) openFilesHandler = null
       }
+    },
+    onOpenFolders: (handler) => {
+      openFoldersHandler = handler
+      const buffered = pendingFolders.splice(0, pendingFolders.length)
+      for (const folders of buffered) handler(folders)
+      return () => {
+        if (openFoldersHandler === handler) openFoldersHandler = null
+      }
     }
+  },
+  creatives: {
+    load: () => ipcRenderer.invoke('creatives:load'),
+    save: (strokes) => ipcRenderer.invoke('creatives:save', strokes ?? []),
   },
   edit: {
     cutoutAuto: (path, options) => ipcRenderer.invoke('edit:cutout-auto', path, options ?? {}),
@@ -119,8 +147,11 @@ const bridge: OpenPicsBridge = {
     setModel: (path: string) => ipcRenderer.invoke('ai:setModel', path),
     getPrompt: () => ipcRenderer.invoke('ai:getPrompt'),
     setPrompt: (content: string) => ipcRenderer.invoke('ai:setPrompt', content),
-    chat: (message: string, context?: any) => ipcRenderer.invoke('ai:chat', message, context),
+    chat: (message: string, context?: AiChatContext, requestId?: number) =>
+      ipcRenderer.invoke('ai:chat', message, context, requestId),
+    cancel: (requestId: number) => ipcRenderer.invoke('ai:cancel', requestId),
     onDelta: (handler) => subscribe(AI_DELTA_CHANNEL, handler),
+    onTool: (handler) => subscribe(AI_TOOL_CHANNEL, handler),
     autotag: (targets: Array<{ id: string; path: string }>) => ipcRenderer.invoke('ai:autotag', targets),
     similar: (path: string, candidates: string[]) => ipcRenderer.invoke('ai:similar', path, candidates)
   },
@@ -134,7 +165,14 @@ const bridge: OpenPicsBridge = {
     state: () => ipcRenderer.invoke('win:state'),
     quit: () => ipcRenderer.invoke('win:quit')
   },
-    onOpenChat: (handler: () => void) => { return subscribe('openpics:open-chat', handler as any) },
+    // Both of these fire with no payload, so the handler is passed `undefined`
+    // rather than cast to `any`: `subscribe<void>` types the payload as void,
+    // which a `() => void` handler already accepts. The cast that used to be here
+    // was only there because the parameter had no annotation to infer from.
+    onOpenChat: (handler: () => void) => { return subscribe<void>(OPEN_CHAT_CHANNEL, handler) },
+    onCreativesChanged: (handler: () => void) => {
+      return subscribe<void>(CREATIVES_CHANGED_CHANNEL, handler)
+    },
   onCommand: (handler) => {
     return subscribe(COMMAND_CHANNEL, handler)
   }

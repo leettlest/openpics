@@ -200,12 +200,24 @@ useEffect(() => {
   )
 
   const begin = useCallback(async (): Promise<void> => {
+    // Any session already held is closed first. `begin` is reachable from the
+    // 'e' key and from the panel's button, and holding one down fires several key
+    // events before the first `open` has returned - so without this, the second
+    // call overwrote `editRef` and left the first handle in the main process with
+    // no reference from here. That handle keeps a full-resolution raster and a
+    // mask alive and counted against the 48-megapixel budget, so it is memory
+    // that stays spent until LRU eviction happens to reclaim it.
+    //
+    // Closed rather than reused: `bridge.edit.open` without a `reuseId` always
+    // returns a new id, so there is nothing to reuse, and the old one would have
+    // to be released anyway.
+    releaseSession()
     const opened = await run('Opening', () => bridge.edit.open(path))
     if (!opened) return
     editRef.current = opened.id
     setInfo(opened)
     setActive(true)
-  }, [path, run])
+  }, [path, run, releaseSession])
 
   const end = useCallback(async (): Promise<void> => {
     releaseSession()

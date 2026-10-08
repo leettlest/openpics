@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, nativeTheme, protocol, shell } from 'electron'
-import { statSync } from 'node:fs'
-import { dirname, extname, join, resolve } from 'node:path'
+import { statSync, watch, type FSWatcher } from 'node:fs'
+import { join, resolve } from 'node:path'
 import type { DriveInfo, ScanProgress, ScanResult, Settings, ThumbnailStats, WallpaperFit } from '../shared/protocol'
 import type {
   ApplyOptions,
@@ -11,8 +11,8 @@ import type {
   SelectionCommand
 } from '../shared/edit'
 import { isImage, THUMB_SCHEME } from '../shared/protocol'
-import { AI_DELTA_CHANNEL, OPEN_FILES_CHANNEL, SCAN_PROGRESS_CHANNEL } from '../shared/bridge'
-import type { AiChatContext } from '../shared/ai-types'
+import { AI_DELTA_CHANNEL, AI_TOOL_CHANNEL, CREATIVES_CHANGED_CHANNEL, OPEN_CHAT_CHANNEL, OPEN_FILES_CHANNEL, OPEN_FOLDERS_CHANNEL, SCAN_PROGRESS_CHANNEL } from '../shared/bridge'
+import type { AiChatContext, AiToolActivity } from '../shared/ai-types'
 import { cancelScan, listDrives, scanComputer, scanFolder } from './scanner'
 import {
   disposeEdits,
@@ -30,7 +30,17 @@ import {
   handleSelection,
   handleUndo
 } from './editing'
-import { clearThumbMemory, registerThumbScheme, setAllowedRoots, thumbStats } from './thumbs'
+import {
+  allowedRootList,
+  clearThumbMemory,
+  hasAllowedRoots,
+  isAllowed,
+  registerThumbScheme,
+  setAllowedRoots,
+  thumbStats
+} from './thumbs'
+import { loadCreatives, saveCreatives } from './creatives'
+import type { Stroke } from '../shared/creatives-draw'
 import { probeExif } from './imageinfo'
 import { defaultRoot, loadSettings, saveSettings } from './settings'
 import {
@@ -58,6 +68,17 @@ const WINDOW_H = 840
 const MIN_W = 720
 const MIN_H = 520
 const TITLEBAR_H = 44
+
+/**
+ * GUI probe mode, entered with the `--probe` flag (see scripts/gui-probe.mjs).
+ *
+ * A probe launches the real app but must not touch the user's machine: no model
+ * warm-up (seconds of CPU and a child process for a UI check), no registry
+ * writes, no tray icon. The probe script pairs this with a throwaway
+ * `--user-data-dir`, so settings, thumbnails and the prompt file stay isolated
+ * too. Nothing here changes what the app can do, only what it starts eagerly.
+ */
+const PROBE_MODE = process.argv.includes('--probe')
 
 let win: BrowserWindow | null = null
 let tray: TrayRef | null = null
@@ -144,7 +165,18 @@ function createWindow(): BrowserWindow {
   const owner = created.webContents.id
   // A reload wipes the renderer's tabs, so any shell it started would be orphaned
   // with no way to reach it. Taking them down with the document is the safe read.
-  created.webContents.on('did-navigate', () => killTerminalsForOwner(owner))
+  //
+  // Edit sessions go the same way. The renderer normally closes them itself on
+  // unmount, but a reload that skips unmount - a crash, or a reload held down at
+  // the wrong moment - leaves the main process holding a decoded original and a
+  // mask for every edit that was open, with no id anywhere that could reach them.
+  // The budget would refuse new work and nothing would free it. There is only ever
+  // one window (`createWindow` has a single caller path), so closing them all here
+  // cannot take out a session another window is still using.
+  created.webContents.on('did-navigate', () => {
+    killTerminalsForOwner(owner)
+    disposeEdits()
+  })
 
   created.once('ready-to-show', () => {
     if (settings.launchMinimized) {
@@ -208,6 +240,71 @@ function deliverFiles(paths: string[]): void {
 }
 
 /**
+ * Watches the drawing file for outside edits - an agent working over MCP, or
+ * another window - and tells the renderer to reload it.
+ *
+ * The channel carries no drawing data, only the news that it changed: the
+ * renderer re-reads through the validated load path, so a corrupt file can
+ * never arrive as shapes. Debounced, because one save lands as several
+ * filesystem events and the renderer must not reload five times for it.
+ * Watching our own saves too is harmless for the same reason the renderer
+ * ignores them: a reload that changes nothing changes nothing.
+ */
+let creativesWatcher: FSWatcher | null = null
+let creativesNotifyTimer: NodeJS.Timeout | null = null
+
+function watchCreatives(): void {
+  if (creativesWatcher) return
+  let dir: string
+  try {
+    dir = app.getPath('userData')
+  } catch {
+    return
+  }
+  try {
+    creativesWatcher = watch(dir, (event, filename) => {
+      if (filename !== null && filename !== 'creatives.json') return
+      if (event !== 'change' && event !== 'rename') return
+      if (creativesNotifyTimer) clearTimeout(creativesNotifyTimer)
+      creativesNotifyTimer = setTimeout(() => {
+        creativesNotifyTimer = null
+        if (win && !win.isDestroyed()) win.webContents.send(CREATIVES_CHANGED_CHANNEL)
+      }, 300)
+    })
+  } catch {
+    creativesWatcher = null
+  }
+}
+
+/**
+ * Whether an argv vector asks for the assistant: the `--chat` CLI flag.
+ *
+ * Flags never reach the file picker - anything starting with a dash is skipped
+ * there - so this is checked separately, on both the cold-start and the
+ * second-instance paths.
+ */
+function wantsChat(argv: string[]): boolean {
+  return argv.includes('--chat')
+}
+
+/**
+ * Ask the renderer to open the assistant, whenever it is listening.
+ *
+ * Same queueing as files: a cold start asks before React has mounted, so the
+ * request waits for `renderer-ready` instead of being sent at a subscriber that
+ * does not exist yet and lost.
+ */
+let pendingChat = false
+
+function requestChat(): void {
+  pendingChat = true
+  if (rendererReady && win && !win.isDestroyed()) {
+    pendingChat = false
+    win.webContents.send(OPEN_CHAT_CHANNEL)
+  }
+}
+
+/**
  * Picks openable files out of an argv vector: pictures and clips.
  *
  * Chromium injects its own switches (`--user-data-dir=...` in particular, which
@@ -234,12 +331,70 @@ function libraryPathsFromArgv(argv: string[]): string[] {
   return found
 }
 
+/**
+ * Picks folders out of an argv vector: existing directories.
+ *
+ * A folder argument used to fall through every check and do nothing, which
+ * reads as the app ignoring you. The renderer re-points the library at the
+ * first one; the rest are ignored, because the library has one root and
+ * silently picking one of several would be worse than saying so.
+ *
+ * The lone `.` is skipped on purpose: it is Electron's own app-path argument
+ * (`electron .`), not a folder the user named, and without the skip every dev
+ * launch would re-point the library at the checkout. Pass the full path when
+ * the working directory is really what is wanted.
+ */
+function libraryFoldersFromArgv(argv: string[]): string[] {
+  const found: string[] = []
+  for (const arg of argv) {
+    if (arg.startsWith('-') || arg === '.') continue
+    try {
+      const full = resolve(arg)
+      if (statSync(full).isDirectory()) found.push(full)
+    } catch {
+      /* a path that no longer exists is not worth reporting */
+    }
+  }
+  return found
+}
+
+let pendingFolders: string[] = []
+
+function deliverFolders(folders: string[]): void {
+  if (folders.length === 0) return
+  if (!rendererReady) {
+    pendingFolders = [...pendingFolders, ...folders]
+    return
+  }
+  if (win && !win.isDestroyed()) win.webContents.send(OPEN_FOLDERS_CHANNEL, folders)
+}
+
 /** Forwards a walk's progress to the renderer, which is the only thing that can show it. */
 function sendProgress(progress: ScanProgress): void {
   if (win && !win.isDestroyed()) win.webContents.send(SCAN_PROGRESS_CHANNEL, progress)
 }
 
-import { autotagPhoto, chatAi, ensurePromptFile, findBundledModels, findSimilar, getAiState, initAi, pickDefaultModel, stopAi, warmAi } from './ai'
+import { ChatCancelledError, autotagPhoto, chatAi, clearSimilarCache, ensurePromptFile, findBundledModels, findSimilar, getAiState, initAi, setAiModel, stopAi, toolsEnabled, warmAi } from './ai'
+
+/**
+ * Abort controllers for in-flight chat requests, by renderer request ID.
+ *
+ * Each chat gets its own controller so stopping one answer cannot stop another.
+ * Renderers invalidate stale requests by ID as well, because a delta already on
+ * its way down the channel can arrive after the abort that should have stopped
+ * it.
+ */
+const activeChats = new Map<number, AbortController>()
+/** Requests cancelled before their chat handler registered a controller. */
+const cancelledChats = new Set<number>()
+
+function pruneCancelledChats(): void {
+  while (cancelledChats.size > 50) {
+    const oldest = cancelledChats.values().next()
+    if (oldest.done) return
+    cancelledChats.delete(oldest.value)
+  }
+}
 
 function wireIpc(): void {
   ipcMain.handle('settings:get', () => loadSettings())
@@ -285,6 +440,9 @@ function wireIpc(): void {
     // from a folder the user did not just choose.
     setAllowedRoots([root])
     clearThumbMemory()
+    // A new walk can rename everything the similarity hashes meant, so they go
+    // with the old thumbnails rather than matching stale bytes.
+    clearSimilarCache()
     // Folder walks report progress too: a deep tree on a spinning disk takes
     // long enough that the window would otherwise look frozen.
     return scanFolder(root, recursive, sendProgress)
@@ -300,6 +458,7 @@ function wireIpc(): void {
     const drives = listDrives().filter((drive) => !drive.unreadable)
     setAllowedRoots(drives.map((drive) => drive.root))
     clearThumbMemory()
+    clearSimilarCache()
     return scanComputer(sendProgress)
   })
 
@@ -312,15 +471,33 @@ function wireIpc(): void {
   // interaction. Only then is it safe to hand over queued paths.
   ipcMain.handle('library:renderer-ready', () => {
     rendererReady = true
-    if (pendingFiles.length === 0) return
-    const queued = pendingFiles
-    pendingFiles = []
-    if (win && !win.isDestroyed()) win.webContents.send(OPEN_FILES_CHANNEL, queued)
+    if (pendingFiles.length !== 0) {
+      const queued = pendingFiles
+      pendingFiles = []
+      if (win && !win.isDestroyed()) win.webContents.send(OPEN_FILES_CHANNEL, queued)
+    }
+    if (pendingFolders.length !== 0) {
+      const queued = pendingFolders
+      pendingFolders = []
+      if (win && !win.isDestroyed()) win.webContents.send(OPEN_FOLDERS_CHANNEL, queued)
+    }
+    if (pendingChat) {
+      pendingChat = false
+      if (win && !win.isDestroyed()) win.webContents.send(OPEN_CHAT_CHANNEL)
+    }
   })
 
   ipcMain.handle('thumb:stats', (): ThumbnailStats => ({ ...thumbStats }))
 
-  ipcMain.handle('library:exif', (_event, path: string) => probeExif(path, extname(path).slice(1)))
+  ipcMain.handle('library:exif', (_event, path: string) => probeExif(path))
+
+  // Drawing persistence. The canvas restores from here on mount and saves a
+  // debounced copy on change; validation lives on the main side so a corrupt
+  // file can never reach the renderer as anything but null.
+  ipcMain.handle('creatives:load', () => loadCreatives())
+  ipcMain.handle('creatives:save', (_e, strokes: Stroke[]) => {
+    saveCreatives(Array.isArray(strokes) ? strokes : [])
+  })
 
   ipcMain.handle('edit:cutout-auto', (_e, path: string, options: CutoutOptions) => handleCutoutAuto(path, options))
   ipcMain.handle('edit:open', (_e, path: string, edit?: string) => handleOpen(path, edit))
@@ -346,9 +523,7 @@ function wireIpc(): void {
   ipcMain.handle('ai:listModels', async () => findBundledModels())
 
   ipcMain.handle('ai:setModel', async (_e, path: string) => {
-    const s = getAiState()
-    const next = { ...s, modelPath: path, modelName: path.split(/[\\\\\\/]/).pop() || null, ready: !!path }
-    return next
+    return setAiModel(path)
   })
 
   ipcMain.handle('ai:getPrompt', async () => {
@@ -365,18 +540,50 @@ function wireIpc(): void {
     return { path: p, content: readPromptFile() }
   })
 
-  ipcMain.handle('ai:chat', async (event, message: string, context?: AiChatContext) => {
+  ipcMain.handle('ai:chat', async (event, message: string, context?: AiChatContext, requestId?: number) => {
+    const id = Number.isFinite(requestId) ? Number(requestId) : 0
+    if (cancelledChats.has(id)) return { content: '', cancelled: true }
+    const controller = new AbortController()
+    activeChats.set(id, controller)
     const onDelta = (delta: string): void => {
-      if (!event.sender.isDestroyed()) event.sender.send(AI_DELTA_CHANNEL, delta)
+      if (!event.sender.isDestroyed()) event.sender.send(AI_DELTA_CHANNEL, { requestId: id, delta })
+    }
+    // A tool call is silent from the outside: the model asks, main runs it, and
+    // the next text arrives seconds later. The dock shows this in that gap.
+    const onActivity = (activity: AiToolActivity | null): void => {
+      if (!event.sender.isDestroyed()) event.sender.send(AI_TOOL_CHANNEL, { requestId: id, activity })
     }
     try {
-      return await chatAi(message, context, onDelta)
+      return await chatAi(message, context, onDelta, onActivity, controller.signal)
     } catch (err) {
+      onActivity(null)
+      if (err instanceof ChatCancelledError || controller.signal.aborted) {
+        return { content: '', cancelled: true }
+      }
       return { content: `Error: ${err instanceof Error ? err.message : String(err)}` }
+    } finally {
+      if (activeChats.get(id) === controller) activeChats.delete(id)
+      cancelledChats.delete(id)
     }
   })
 
+  ipcMain.handle('ai:cancel', (_e, requestId?: number) => {
+    const id = Number.isFinite(requestId) ? Number(requestId) : 0
+    // Remember the cancellation even if the chat handler has not registered yet:
+    // the renderer may stop a request while main is still starting its runtime.
+    cancelledChats.add(id)
+    pruneCancelledChats()
+    activeChats.get(id)?.abort()
+  })
+
   ipcMain.handle('ai:autotag', async (_e, targets: Array<{ id: string; path: string }>) => {
+    // Tag suggestions send pictures to the model and write tags, so they are an
+    // agent tool like the chat tools - not a local computation like similarity
+    // search, which stays available. Refusing loudly beats tagging nothing while
+    // the button says Tagging.
+    if (!toolsEnabled()) {
+      throw new Error('Agent tools are blocked for this profile. Turn them on in Settings to suggest tags.')
+    }
     const results: Array<{ photoId: string; tags: string[] }> = []
     for (const target of targets ?? []) {
       const tagged = await autotagPhoto(target.id, target.path)
@@ -388,14 +595,57 @@ function wireIpc(): void {
     findSimilar(path, candidates ?? [])
   )
   ipcMain.handle('wallpaper:get', () => getWallpaper())
-  // Deliberately not debounced or rate-limited: the user asked for this desktop
+// Deliberately not debounced or rate-limited: the user asked for this desktop
   // and is watching it change. Nothing else in the app calls it.
-  ipcMain.handle('wallpaper:set', (_e, path: string, fit: WallpaperFit) => setWallpaper(path, fit))
+  ipcMain.handle('wallpaper:set', (_e, path: string, fit: WallpaperFit) => {
+    // The picture becomes the desktop, so it is the one write a renderer could
+    // make that a user would notice without being in the app to ask for it.
+    assertWithinLibrary(path, 'set as wallpaper')
+    return setWallpaper(path, fit)
+  })
 
-  ipcMain.handle('shell:reveal', (_e, path: string) => {
+  /**
+   * Refuses a path that is not inside the library currently open.
+   *
+   * Uses the same roots as the thumbnail protocol, so "a file the app will show"
+   * and "a file the shell may act on" cannot drift apart - and both are re-pinned
+   * on every scan, so opening a folder is what grants this. Throws rather than
+   * returning a flag, because every caller here is a one-line body that would
+   * otherwise have to remember to check a second time.
+   *
+   * The refusal text distinguishes "nothing is open" from "that is elsewhere",
+   * since `isAllowed` reports both as false.
+   */
+  function assertWithinLibrary(path: string, action: string): void {
+    if (typeof path !== 'string' || path.trim() === '') {
+      throw new Error(`cannot ${action}: no path given`)
+    }
+    if (isAllowed(path)) return
+    if (!hasAllowedRoots()) {
+      throw new Error(`cannot ${action}: no folder is open yet. Open one first.`)
+    }
+    throw new Error(
+      `cannot ${action} ${JSON.stringify(path)}: it is outside the open library. ` +
+        `Open: ${allowedRootList().join(', ')}`
+    )
+  }
+
+ipcMain.handle('shell:reveal', (_e, path: string) => {
+    // Same containment rule as shell:open below, and for the same reason: this
+    // path arrives from the renderer, and handing an arbitrary one to Explorer is
+    // a way to have the OS do something with a file the app never listed.
+    assertWithinLibrary(path, 'show in folder')
     shell.showItemInFolder(path)
   })
+
   ipcMain.handle('shell:open', async (_e, path: string) => {
+    // `openPath` is Windows `ShellExecute`, so this hands the path to whatever
+    // the registry says handles that extension. Only a file the library contains
+    // gets there, which means a compromised renderer cannot name an `.exe`, a
+    // `.bat` or a `.lnk` and have it launched. This was the one shell channel
+    // with neither a guard nor a note saying why it was safe; open-url beside it
+    // validates for exactly this reason.
+    assertWithinLibrary(path, 'open')
     await shell.openPath(path)
   })
 
@@ -406,7 +656,13 @@ ipcMain.handle('shell:open-url', async (_e, url: string) => {
       await shell.openExternal(url)
     })
 
-    ipcMain.handle('shell:bin', (_e, paths: string[]) => sendToBin(paths))
+    ipcMain.handle('shell:bin', (_e, paths: string[]) => {
+      // Containment as well. Moving to the bin is recoverable, which is why it is
+      // not treated as an emergency, but a renderer that could name any path
+      // could still clear out a folder the app has never listed.
+      for (const path of paths) assertWithinLibrary(path, 'move to the Recycle Bin')
+      return sendToBin(paths)
+    })
 
   ipcMain.handle('shell:associations', async (_e, enabled: boolean) => {
     const next = await setFileAssociations(enabled)
@@ -490,25 +746,40 @@ if (!app.requestSingleInstanceLock()) {
   // arguments. The first element is always the executable, so it is skipped.
   app.on('second-instance', (_event, argv) => {
     showWindow()
-    deliverFiles(libraryPathsFromArgv(argv.slice(1)))
+    const args = argv.slice(1)
+    deliverFiles(libraryPathsFromArgv(args))
+    deliverFolders(libraryFoldersFromArgv(args))
+    if (wantsChat(args)) requestChat()
   })
 
+  // `.catch` rather than a bare `.then`, so a throw anywhere in startup is
+  // reported rather than surfacing as an unhandled rejection. Electron shows
+  // nothing for those by default: no dialog, no log line, just an app that
+  // never opens a window. A window that fails to appear is the single worst
+  // failure mode for a desktop app to have, and it is the one this silence makes
+  // undiagnosable.
   app.whenReady().then(() => {
     const settings = loadSettings()
     nativeTheme.themeSource = settings.theme
 
     registerThumbScheme()
     wireIpc()
+    // Live drawing sync: agent edits over MCP land here while the app is open.
+    watchCreatives()
     win = createWindow()
     win.setAlwaysOnTop(settings.alwaysOnTop)
 
     // A cold start with files on the command line: the window is not listening
     // yet, so these queue until did-finish-load.
-    deliverFiles(libraryPathsFromArgv(process.argv.slice(1)))
+    const launchArgs = process.argv.slice(1)
+    deliverFiles(libraryPathsFromArgv(launchArgs))
+    deliverFolders(libraryFoldersFromArgv(launchArgs))
+    if (wantsChat(launchArgs)) requestChat()
 
     // Load the local model in the background so the first question is instant.
     // Starting a child process is not something first paint should wait on.
-    if (settings.aiEnabled) void warmAi()
+    // Skipped in probe mode: a UI check must not pay for a model load.
+    if (settings.aiEnabled && !PROBE_MODE) void warmAi()
 
 
     // Registering the context-menu entries is a handful of registry writes plus a
@@ -519,22 +790,37 @@ if (!app.requestSingleInstanceLock()) {
     // toggle in Settings reports the real state next time it is opened. Swallowing
     // it keeps a locked-down or policy-restricted registry from surfacing as an
     // unhandled rejection with nothing to show for it.
-    void ensureFileAssociations(settings.shellIntegration).catch(() => false)
+    // Skipped in probe mode: a UI check must not write the user's registry.
+    if (!PROBE_MODE) void ensureFileAssociations(settings.shellIntegration).catch(() => false)
 
-    tray = buildTray({
-      onShow: showWindow,
-      onCommand: broadcast,
-      onQuit: () => {
-        quitting = true
-        app.quit()
-      }
-    })
-    updateTray(tray, { slideshow: false, count: 0 })
+    // No tray icon in probe mode either: it would outlive the probe window and
+    // pollute the user's tray. `tray` stays null and every use is optional.
+    if (!PROBE_MODE) {
+      tray = buildTray({
+        onShow: showWindow,
+        onCommand: broadcast,
+        onQuit: () => {
+          quitting = true
+          app.quit()
+        }
+      })
+      updateTray(tray, { slideshow: false, count: 0 })
+    }
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) win = createWindow()
       else showWindow()
     })
+  }).catch((err: unknown) => {
+    // Startup failed. Electron shows no dialog for an unhandled rejection, so
+    // without this the app looks like it did nothing at all. Quitting is the
+    // honest outcome: a half-built main process with no window and no way for the
+    // user to reach Settings is worse than one that says it stopped.
+    dialog.showErrorBox(
+      'OpenPics could not start',
+      err instanceof Error ? `${err.message}\n\n${err.stack ?? ''}`.trim() : String(err)
+    )
+    app.exit(1)
   })
 
   app.on('before-quit', () => {

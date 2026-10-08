@@ -6,7 +6,10 @@ export function SmartCollectionsMenu() {
   const collections = useLibrary((s) => s.collections)
   const activeId = useLibrary((s) => s.activeCollectionId)
   const filterCount = useLibrary((s) => activeFilterCount(s))
-  const { setActiveCollection, addCollectionFromFilters, removeCollection } = useLibrary()
+  // Actions only; see the note in App.tsx.
+  const setActiveCollection = useLibrary((s) => s.setActiveCollection)
+  const addCollectionFromFilters = useLibrary((s) => s.addCollectionFromFilters)
+  const removeCollection = useLibrary((s) => s.removeCollection)
   const [open, setOpen] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
 

@@ -21,6 +21,18 @@ const {
   serializeSvg,
   strokeInk,
   strokeOpacity,
+  strokeDasharray,
+  strokeBlur,
+  strokeKind,
+  strokeVisible,
+  strokeOffset,
+  linePath,
+  rectPath,
+  ellipsePath,
+  arrowPath,
+  mirrorPoints,
+  scatterDots,
+  dotsPath,
   toArtboard,
   MIN_SAMPLE_DISTANCE,
   VIEW_W,
@@ -135,6 +147,76 @@ check('opacity is clamped at the bottom', strokeOpacity(stroke({ opacity: -20 })
   check('an offset rect is honoured', JSON.stringify(toArtboard(210, 160, { ...rect, left: 10, top: 10 })) === JSON.stringify({ x: VIEW_W / 2, y: VIEW_H / 2 }))
   check('a collapsed rect yields no point', toArtboard(10, 10, { ...rect, width: 0 }) === null)
   check('a zero-height rect yields no point', toArtboard(10, 10, { ...rect, height: 0 }) === null)
+}
+
+// shape builders
+check('a line is two endpoints', linePath(0, 0, 10, 20) === 'M 0.00 0.00 L 10.00 20.00', linePath(0, 0, 10, 20))
+{
+  const rect = rectPath(30, 10, 10, 40)
+  check('a rect closes whatever the drag direction', rect.endsWith('Z') && rect.includes('M 10.00 10.00'), rect)
+}
+{
+  const ellipse = ellipsePath(0, 0, 20, 10)
+  check('an ellipse is two arcs', (ellipse.match(/ A /g) ?? []).length === 2 && ellipse.endsWith('Z'), ellipse)
+  check('a flat ellipse falls back to a line', ellipsePath(5, 5, 5, 9) === linePath(5, 5, 5, 9))
+}
+{
+  const arrow = arrowPath(0, 0, 40, 0)
+  check('an arrow carries a head', (arrow.match(/ L /g) ?? []).length === 3, arrow)
+}
+
+// symmetry
+{
+  const pts = [{ x: 100, y: 50 }]
+  check('off mirrors nothing', mirrorPoints(pts, 'off') === pts)
+  check('x mirrors across the centre', JSON.stringify(mirrorPoints(pts, 'x')) === JSON.stringify([{ x: VIEW_W - 100, y: 50 }]))
+  check('y mirrors across the middle', JSON.stringify(mirrorPoints(pts, 'y')) === JSON.stringify([{ x: 100, y: VIEW_H - 50 }]))
+  check('both mirrors both', JSON.stringify(mirrorPoints(pts, 'both')) === JSON.stringify([{ x: VIEW_W - 100, y: VIEW_H - 50 }]))
+}
+
+// airbrush scatter
+{
+  const gesture = [{ x: 0, y: 0 }, { x: 60, y: 0 }]
+  const a = scatterDots(gesture, 8, 2, 42)
+  const b = scatterDots(gesture, 8, 2, 42)
+  check('the same seed sprays the same dots', JSON.stringify(a) === JSON.stringify(b))
+  check('a different seed sprays differently', JSON.stringify(a) !== JSON.stringify(scatterDots(gesture, 8, 2, 43)))
+  check('dots stay near the gesture', a.every((d) => d.x >= -8 && d.x <= 68 && Math.abs(d.y) <= 8), `dots: ${a.length}`)
+  check('nothing to spray, no dots', scatterDots([], 8, 2, 1).length === 0)
+  check('a dot path is all arcs', dotsPath([{ x: 5, y: 5 }], 2).includes(' a '))
+}
+
+// stroke style helpers
+check('solid has no dash pattern', strokeDasharray(stroke()) === null)
+check('a dash scales with the width', strokeDasharray(stroke({ dash: 'dash', width: 4 })) === '12.00 6.00')
+check('dots are tiny with round caps behind them', strokeDasharray(stroke({ dash: 'dot', width: 4 })) === '0.1 8.00')
+check('no blur by default', strokeBlur(stroke()) === 0)
+check('a set blur reads back', strokeBlur(stroke({ blur: 6 })) === 6)
+check('old saves are freehand paths', strokeKind(stroke()) === 'path' && strokeKind(stroke({ kind: 'shape' })) === 'shape')
+check('everything shows unless hidden', strokeVisible(stroke()) === true && strokeVisible(stroke({ visible: false })) === false)
+{
+  const moved = strokeOffset(stroke({ dx: 5, dy: -3 }))
+  check('a move reads back as an offset', moved.dx === 5 && moved.dy === -3)
+  check('no move is zero', strokeOffset(stroke()).dx === 0 && strokeOffset(stroke()).dy === 0)
+}
+check('the eraser follows recoloured paper', strokeInk(stroke({ tool: 'eraser' }), '#123456') === '#123456')
+
+// serialization of the new kinds
+{
+  const svg = serializeSvg([
+    stroke({ id: 1, d: rectPath(0, 0, 10, 10), kind: 'shape', fill: '#ff0000' }),
+    stroke({ id: 2, d: '', kind: 'text', text: 'hi <there>', fontSize: 20 }),
+    stroke({ id: 3, visible: false }),
+    stroke({ id: 4, d: linePath(0, 0, 5, 5), dash: 'dash' }),
+    stroke({ id: 5, blur: 4 }),
+    stroke({ id: 6, dx: 10, dy: 5 })
+  ])
+  check('a filled shape fills', svg.includes('fill="#ff0000"') && !svg.includes('stroke="none" stroke="none"'), svg)
+  check('text becomes a text element with escaped content', svg.includes('<text') && svg.includes('hi &lt;there&gt;'), svg)
+  check('hidden strokes leave the export', (svg.match(/<path /g) ?? []).length === 4, svg)
+  check('dashes are written', svg.includes('stroke-dasharray="18.00 9.00"'), svg)
+  check('blur gets a filter def and a reference', svg.includes('<filter id="soft4"') && svg.includes('filter="url(#soft4)"'), svg)
+  check('a move becomes a translate', svg.includes('transform="translate(10.00 5.00)"'), svg)
 }
 
 console.log(`\n==== ${pass} passed, ${fail} failed ====`)

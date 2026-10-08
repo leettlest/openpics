@@ -1,6 +1,6 @@
 import { HardDrives, FolderOpen, ImageSquare, MagnifyingGlass, ArrowClockwise } from '@phosphor-icons/react'
 import { useLibrary } from '@/store/library'
-import { prettyPath } from '@/lib/format'
+import { formatCount, prettyPath } from '@/lib/format'
 import { Button } from './ui'
 
 /**
@@ -11,8 +11,13 @@ import { Button } from './ui'
  * and in computer mode the wording has to describe drives instead of a folder.
  */
 export function ScanningState() {
-  const { progress, cancelScan, settings } = useLibrary()
-  const computer = settings.scanMode === 'computer'
+  // `progress` changes on every scan tick and is genuinely wanted here - it is
+  // the readout. `settings` and the action are pulled apart so the component
+  // re-renders for the tick and not for unrelated writes.
+  const progress = useLibrary((s) => s.progress)
+  const cancelScan = useLibrary((s) => s.cancelScan)
+  const scanMode = useLibrary((s) => s.settings.scanMode)
+  const computer = scanMode === 'computer'
 
   return (
     <div
@@ -41,16 +46,46 @@ export function ScanningState() {
 }
 
 export function EmptyState({ filtered = false }: { filtered?: boolean }) {
-  const { pickFolder, rescan, scanComputer, status, error, settings } = useLibrary()
+  const pickFolder = useLibrary((s) => s.pickFolder)
+  const rescan = useLibrary((s) => s.rescan)
+  const scanComputer = useLibrary((s) => s.scanComputer)
+  const status = useLibrary((s) => s.status)
+  const error = useLibrary((s) => s.error)
+  const settings = useLibrary((s) => s.settings)
+  const query = useLibrary((s) => s.query)
+  const typeFilter = useLibrary((s) => s.typeFilter)
+  const dateStart = useLibrary((s) => s.dateStart)
+  const dateEnd = useLibrary((s) => s.dateEnd)
+  const sizeMin = useLibrary((s) => s.sizeMin)
+  const sizeMax = useLibrary((s) => s.sizeMax)
+  const cameraFilter = useLibrary((s) => s.cameraFilter)
+  const tagFilter = useLibrary((s) => s.tagFilter)
+  const activeCollectionId = useLibrary((s) => s.activeCollectionId)
+  const collections = useLibrary((s) => s.collections)
+  const clearAllFilters = useLibrary((s) => s.clearAllFilters)
   const computer = settings.scanMode === 'computer'
 
   if (filtered) {
+    // The old button cleared only the text query, so with a date or tag filter
+    // active it visibly did nothing. Name what is actually hiding the pictures
+    // and clear all of it.
+    const active: string[] = []
+    if (query.trim() !== '') active.push(`search “${query.trim()}”`)
+    if (typeFilter !== 'all') active.push(typeFilter === 'image' ? 'images only' : 'videos only')
+    if (dateStart !== null || dateEnd !== null) active.push('date range')
+    if (sizeMin !== null || sizeMax !== null) active.push('size range')
+    if (cameraFilter.trim() !== '') active.push(`camera “${cameraFilter.trim()}”`)
+    if (tagFilter.length > 0) active.push(tagFilter.length === 1 ? `tag “${tagFilter[0]}”` : `${tagFilter.length} tags`)
+    const collection = collections.find((c) => c.id === activeCollectionId && c.enabled)
+    if (collection) active.push(`collection “${collection.name}”`)
     return (
       <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-8 text-center">
         <MagnifyingGlass size={26} weight="light" className="text-ink-3" />
-        <p className="text-[13px] text-ink-2">No picture matches that filter.</p>
-        <Button size="sm" onClick={() => useLibrary.getState().setQuery('')}>
-          Clear filter
+        <p className="text-[13px] text-ink-2">
+          {active.length === 0 ? 'No picture matches.' : `No picture matches ${active.join(' · ')}.`}
+        </p>
+        <Button size="sm" onClick={() => clearAllFilters()}>
+          {active.length > 1 ? 'Clear all filters' : 'Clear filter'}
         </Button>
       </div>
     )
@@ -113,9 +148,4 @@ export function EmptyState({ filtered = false }: { filtered?: boolean }) {
       </div>
     </div>
   )
-}
-
-/** Thousands-separated, so a five-figure count stays readable. */
-function formatCount(n: number): string {
-  return n.toLocaleString('en-US')
 }

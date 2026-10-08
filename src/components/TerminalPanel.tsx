@@ -24,6 +24,12 @@ interface Tab {
   cwd: string
 }
 
+/** What a terminal view accepts from the panel's single output subscription. */
+interface TerminalRoute {
+  onData: (data: string) => void
+  onExit: () => void
+}
+
 const MAX_TABS = 8
 const MIN_HEIGHT = 120
 /** Room left for the title bar, toolbar, panel bar and status bar when maximised. */
@@ -92,6 +98,53 @@ export function TerminalPanel() {
   heightRef.current = height
   const wasOpen = useRef(false)
   const wasEnabled = useRef(false)
+
+  /**
+   * Where each session's output goes. One subscription for the whole panel
+   * routes by id, instead of every view subscribing to the global channels and
+   * filtering out everyone else's output. A view registers when it mounts and
+   * unregisters when it goes away; output for an id with no view yet is held
+   * below rather than dropped, so the first bytes of a just-spawned shell
+   * survive the gap between spawning and mounting.
+   */
+  const routesRef = useRef(new Map<string, TerminalRoute>())
+  const heldRef = useRef(new Map<string, string[]>())
+
+  useEffect(() => {
+    const offData = bridge.terminal.onData((event) => {
+      const route = routesRef.current.get(event.id)
+      if (route) {
+        route.onData(event.data)
+        return
+      }
+      const held = heldRef.current.get(event.id) ?? []
+      held.push(event.data)
+      // A session that never gains a view must not grow this without bound.
+      while (held.length > 200) held.shift()
+      heldRef.current.set(event.id, held)
+    })
+    const offExit = bridge.terminal.onExit((event) => {
+      routesRef.current.get(event.id)?.onExit()
+    })
+    return () => {
+      offData()
+      offExit()
+    }
+  }, [])
+
+  const registerTerminalRoute = useCallback((id: string, route: TerminalRoute): (() => void) => {
+    routesRef.current.set(id, route)
+    // Anything that arrived before the view registered joins its queue in
+    // arrival order, ahead of whatever the attach backlog brings.
+    const held = heldRef.current.get(id)
+    if (held) {
+      heldRef.current.delete(id)
+      for (const chunk of held) route.onData(chunk)
+    }
+    return () => {
+      if (routesRef.current.get(id) === route) routesRef.current.delete(id)
+    }
+  }, [])
 
   useEffect(() => {
     let live = true
@@ -215,7 +268,11 @@ export function TerminalPanel() {
       window.removeEventListener('pointermove', move)
       window.removeEventListener('pointerup', stop)
       window.removeEventListener('pointercancel', stop)
-      patch({ terminalHeight: heightRef.current })
+      // `void`, matching every other fire-and-forget call to the store in this
+      // file. The height has already been applied locally by the `move` handler
+      // above, so a failed write costs the user their height on next launch and
+      // nothing more; there is no state here worth blocking the pointerup on.
+      void patch({ terminalHeight: heightRef.current })
     }
     window.addEventListener('pointermove', move)
     window.addEventListener('pointerup', stop)
@@ -381,6 +438,7 @@ export function TerminalPanel() {
                   visible={open}
                   theme={theme}
                   focusRequest={focusRequest}
+                  register={registerTerminalRoute}
                   onActivate={() => focusPane(panes.indexOf(tab.id))}
                 />
               ))}
@@ -469,6 +527,7 @@ interface TerminalViewProps {
   visible: boolean
   theme: 'dark' | 'light'
   focusRequest: number
+  register: (id: string, route: TerminalRoute) => () => void
   onActivate: () => void
 }
 
@@ -479,6 +538,7 @@ function TerminalView({
   visible,
   theme,
   focusRequest,
+  register,
   onActivate
 }: TerminalViewProps) {
   const hostRef = useRef<HTMLDivElement>(null)
@@ -523,14 +583,16 @@ function TerminalView({
       void bridge.terminal.resize(id, term.cols, term.rows)
     }
 
-    const offData = bridge.terminal.onData((event) => {
-      if (event.id !== id) return
-      if (attached) term.write(event.data)
-      else pending.push(event.data)
-    })
-    const offExit = bridge.terminal.onExit((event) => {
-      if (event.id !== id) return
-      term.write('\r\n\x1b[2m[process exited]\x1b[0m\r\n')
+    // Output arrives through the panel's single subscription and is routed here
+    // by session id, so this view holds no channel subscription of its own.
+    const unregister = register(id, {
+      onData: (data) => {
+        if (attached) term.write(data)
+        else pending.push(data)
+      },
+      onExit: () => {
+        term.write('\r\n\x1b[2m[process exited]\x1b[0m\r\n')
+      }
     })
     const input = term.onData((data) => {
       void bridge.terminal.write(id, data)
@@ -553,15 +615,14 @@ function TerminalView({
       })
 
     return () => {
-      offData()
-      offExit()
+      unregister()
       input.dispose()
       observer.disconnect()
       term.dispose()
       termRef.current = null
       fitRef.current = null
     }
-  }, [id])
+  }, [id, register])
 
   useEffect(() => {
     const term = termRef.current

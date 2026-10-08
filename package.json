@@ -6,9 +6,6 @@
   "bin": {
     "openpics": "./bin/openpics.js"
   },
-  "bin": {
-    "openpics": "./bin/openpics.js"
-  },
   "author": "Hen <who-lee>",
   "license": "Apache-2.0",
   "repository": {
@@ -37,21 +34,27 @@
   "scripts": {
     "dev": "electron-vite dev",
     "start": "electron-vite preview",
-    "build": "npm run typecheck && electron-vite build",
+    "build": "npm run typecheck && npm run lint && electron-vite build",
     "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.web.json --noEmit && tsc -p tsconfig.mcp.json --noEmit",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
     "build:mcp": "tsc -p tsconfig.mcp.json",
+    "build:store": "node scripts/build-store.mjs",
     "addons": "node scripts/fetch-addons.mjs",
     "model": "node scripts/fetch-model.mjs",
     "vision": "node scripts/fetch-vision.mjs",
     "llama": "node scripts/fetch-llama.mjs",
     "prepackage": "npm run addons && npm run llama && npm run model && npm run vision",
     "build:test": "tsc -p tsconfig.test.json",
-    "test": "npm run build:mcp && npm run build:test && node tests/mcp.test.mjs && node tests/editing.test.mjs && node tests/filters.test.mjs && node tests/ai-vision.test.mjs && node tests/ai-tags.test.mjs && node tests/ai-similar.test.mjs && node tests/creatives-draw.test.mjs && node tests/addons.test.mjs && node tests/video.test.mjs",
+    "test:file": "node scripts/test-file.mjs",
+    "test": "npm run build:mcp && npm run build:test && npm run build:store && node tests/library-store.test.mjs && node tests/mcp.test.mjs && node tests/editing.test.mjs && node tests/filters.test.mjs && node tests/paths.test.mjs && node tests/settings-schema.test.mjs && node tests/ai-vision.test.mjs && node tests/ai-tools.test.mjs && node tests/ai-prompt.test.mjs && node tests/dock-width.test.mjs && node tests/ai-tags.test.mjs && node tests/ai-similar.test.mjs && node tests/creatives-draw.test.mjs && node tests/creatives-file.test.mjs && node tests/addons.test.mjs && node tests/video.test.mjs",
     "mcp": "npm run build:mcp && node dist-mcp/mcp/server.js",
     "package": "npm run build && electron-builder --win --x64",
-    "package:dir": "npm run build && electron-builder --win --x64 --dir"
+    "package:dir": "npm run build && electron-builder --win --x64 --dir",
+    "probe": "node scripts/gui-probe.mjs"
   },
   "dependencies": {
+    "@fontsource-variable/syne": "^5.3.0",
     "@phosphor-icons/react": "^2.1.10",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
@@ -63,6 +66,7 @@
     "zustand": "^5.0.15"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.5",
     "@fontsource-variable/geist": "^5.3.0",
     "@fontsource-variable/geist-mono": "^5.3.0",
     "@modelcontextprotocol/sdk": "^1.31.0",
@@ -74,8 +78,14 @@
     "electron": "^44.5.1",
     "electron-builder": "^26.0.12",
     "electron-vite": "^5.0.0",
+    "eslint": "^9.39.5",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "eslint-plugin-react-refresh": "^0.5.7",
+    "globals": "^17.13.0",
+    "playwright-core": "^1.63.0",
     "tailwindcss": "^4.3.3",
     "typescript": "^5.9.0",
+    "typescript-eslint": "^8.71.1",
     "vite": "^7.3.6",
     "zod": "^4.6.5"
   },
@@ -137,7 +147,8 @@
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
-      "createStartMenuShortcut": true
+      "createStartMenuShortcut": true,
+      "license": "build/TERMS.txt"
     }
   },
   "allowScripts": {

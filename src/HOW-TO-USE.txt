@@ -104,6 +104,13 @@ Pan while zoomed       drag
 Full screen            F
 Details                I
 
+Playing clips
+    The viewer plays clips with its own bar instead of the browser's: play,
+    ten-second jumps, frame stepping, speed, volume, loop, fullscreen, and a
+    seek bar that previews the frame under the pointer. K plays or pauses,
+    J and L jump ten seconds, and comma and period step one frame. Clips start
+    muted; unmute them like anything else. Space stays the slideshow's.
+
 When you are zoomed in, the arrow keys pan the picture instead of changing
 picture. Zoom out, or press 0, and they go back to navigating.
 
@@ -194,9 +201,9 @@ viewer if that was the picture you were looking at.
  9. SETTINGS
 --------------------------------------------------------------------------------
 
-Open it with the gear on the toolbar. It is a full page, and the Back arrow -
-or Escape - returns to your library. Changes apply as you make them; there is
-nothing to save.
+Open it from the Settings tab at the top. It is a full page, and the Library
+tab - or Escape - returns to your library. Changes apply as you make them;
+there is nothing to save.
 
   Library     default folder, what to scan, sort order, thumbnail size,
               slideshow timing, and whether to remember the last folder
@@ -205,6 +212,7 @@ nothing to save.
               defaults
   External    which video and scripting tools were found on this computer
   Agent       the MCP server, and whether agents may use it at all
+  Assistant   which local model answers, and the instruction it reads
   Terminal    whether the built-in shell is available
   Credits     who made this, and how to support the project
 
@@ -216,19 +224,101 @@ The terminal
     already open.
 
 Agent tools
-    Under Settings - Agent (MCP). Turning "Allow agent tools" off makes every
-    tool refuse, including the read-only ones. The setting is re-read on every
-    call, so a switch flipped while an agent is mid-session takes effect at once.
+    Under Settings - Agent tools. Turning "Allow agent tools" off makes every
+    tool refuse, including the read-only ones, and tag suggestions are refused
+    too. Similarity search keeps working: it is local arithmetic with no model
+    involved. The setting is re-read on every call, so a switch flipped while
+    an agent is mid-session takes effect at once.
+
+Assistant model and prompt
+    Under Settings - Assistant model and Assistant prompt. The picker lists the
+    model files on disk; switching loads the new weights first, so it takes a
+    few seconds. The prompt is the instruction read before every answer. Your
+    edits are kept as written and never overwritten by updates; clearing the
+    prompt restores the default.
 
 
 --------------------------------------------------------------------------------
- 10. IF SOMETHING LOOKS WRONG
+ 10. THE AI ASSISTANT
+--------------------------------------------------------------------------------
+
+The dock on the right of the grid holds Chat, Tags, and Similar. Everything
+runs on this machine, on the bundled local model. It collapses to a rail,
+remembers its width, and resizes by drag, arrow keys, or double-click to reset.
+Your tab and unsent text survive a trip to Settings or Creatives.
+
+Chat
+    Ask about your library in plain words. The assistant can search it, read
+    file details and the Recycle Bin, set a wallpaper, and open files - but
+    only ever touches a path from its search results or from files you selected.
+    Anything else is refused. Long answers can be stopped, failed ones retried
+    without retyping.
+
+    Two honest limits. It sees the first 2,000 loaded entries, and says so when
+    your library is bigger, instead of claiming a full count. And when photos
+    are attached it describes what it sees without tools - the vision model
+    cannot call them, and says that instead of promising what it cannot do.
+
+Tags
+    Suggests tags for the selection, read from the pictures themselves when
+    the vision model is present. Needs agent tools allowed.
+
+Similar
+    Finds look-alikes of a photo. Works while agent tools are blocked: it is
+    arithmetic, not a model call.
+
+
+--------------------------------------------------------------------------------
+ 11. CREATIVES
+--------------------------------------------------------------------------------
+
+The Creatives tab is a drawing page with twenty tools in four groups. Draw:
+brush, pencil, marker, highlighter, airbrush, neon, and eraser, each with size
+and fade, plus glow for neon and spray density for the airbrush. Shapes: line,
+rectangle, ellipse, arrow, and placed text, with dashed outlines and fills for
+the closed ones. Edit: fill (a shape, or the paper when nothing is selected),
+colour picker, and select - click to select, Shift-click for several, drag to
+move, Delete to remove. Canvas: symmetry mirroring, a snap-to grid, recoloured
+paper, and a layers panel with visibility, reorder, and delete per stroke.
+
+The canvas always fits the space it is given, as large as possible, so the
+whole surface stays reachable on any window size.
+
+Strokes survive tab switches and restarts. Undo keeps every step, including an
+agent's: an AI driving OpenPics can draw on the same canvas while you watch,
+and one Undo takes its marks back. PNG and SVG export land in your downloads
+folder. Drawing itself needs a mouse, pen, or touch; every toolbar control
+works from the keyboard.
+
+
+--------------------------------------------------------------------------------
+ 12. THE COMMAND LINE
+--------------------------------------------------------------------------------
+
+An installed copy registers the "openpics" command:
+
+    openpics [files or folders] [--chat]
+    openpics --help
+    openpics --version
+
+Files open in the viewer and folders become the library root. "--chat" opens
+the assistant with the composer focused. Running it again while the app is open
+hands everything to the running app instead of starting a duplicate. --help and
+--version answer without launching anything.
+
+
+--------------------------------------------------------------------------------
+ 13. IF SOMETHING LOOKS WRONG
 --------------------------------------------------------------------------------
 
 No pictures in the grid
-    The folder may be empty, or the filter may be excluding what is there.
-    Clear the filter box. If the folder genuinely has pictures in it, Ctrl + R
-    rescans.
+    The folder may be empty, or a filter may be excluding what is there. The
+    empty screen names the active filters - search text, dates, sizes, camera,
+    tags, or a collection - and its button clears all of them at once. If the
+    folder genuinely has pictures in it, Ctrl + R rescans.
+
+    A date or size range typed backwards matches nothing by construction; the
+    filter bar says so next to the inputs instead of leaving a mystery.
 
 Some pictures show the extension instead of a thumbnail
     The app cannot decode that format for preview. The full list is under
@@ -246,7 +336,7 @@ The app feels slow on a big library
 
 
 --------------------------------------------------------------------------------
- 11. WHAT THIS APP DOES NOT DO
+ 14. WHAT THIS APP DOES NOT DO
 --------------------------------------------------------------------------------
 
 No account. No upload. No telemetry. No network code.

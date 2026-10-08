@@ -329,7 +329,15 @@ function readIfd(tiff: Buffer, ifdOffset: number, le: boolean, out: RawExif, dep
  * Reads the small, human-interest slice of EXIF from a picture header. It never
  * touches pixel data and never throws; an unreadable file simply has none.
  */
-export function probeExif(path: string, ext: string): RawExif | null {
+/**
+ * Reads EXIF out of the head of a file.
+ *
+ * No extension argument, where `probeDimensions` takes one: EXIF lives in the
+ * TIFF header, so the bytes answer this on their own and a format check would
+ * only be a way to get the wrong answer for an unusual extension. The parameter
+ * was passed by the one caller and never read.
+ */
+export function probeExif(path: string): RawExif | null {
   const buf = readHead(path)
   if (!buf || buf.length < 8) return null
   try {

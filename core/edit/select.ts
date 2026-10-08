@@ -97,10 +97,28 @@ export function selectRect(raster: Raster, rect: Rect): WandResult {
  * The last point connects back to the first, so callers pass an open list of
  * corners rather than repeating the first one at the end.
  */
+/**
+ * Ceiling on polygon corners.
+ *
+ * The scanline bounds below are taken with a spread, `Math.min(...ys)`, and a
+ * spread passes its arguments as ordinary call arguments - so the engine's
+ * argument limit applies. Somewhere north of a hundred thousand points that
+ * throws a RangeError instead of drawing a polygon, which is a crash rather than
+ * a refusal. 512 is what the desktop panel has always allowed, and a shape with
+ * more corners than that is not one anyone draws by hand.
+ */
+const MAX_POLYGON_POINTS = 512
+
 export function selectPolygon(raster: Raster, points: Array<{ x: number; y: number }>): WandResult {
   const { width, height } = raster
   if (points.length < 3) {
     throw new EditError(`a polygon needs at least 3 points, got ${points.length}`)
+  }
+  // Enforced here rather than at each call site, so every caller gets it. The
+  // panel already checked this itself; the agent-facing tool did not, and that
+  // gap was a live way to crash the process.
+  if (points.length > MAX_POLYGON_POINTS) {
+    throw new EditError(`a polygon can have at most ${MAX_POLYGON_POINTS} points, got ${points.length}`)
   }
 
   const selection = blankSelection(width, height)
@@ -118,8 +136,18 @@ export function selectPolygon(raster: Raster, points: Array<{ x: number; y: numb
   // The scanline is walked one row at a time, so the loop bounds are the only
   // part that scales with the picture; the crossing test is per span, not per
   // pixel, which keeps a many-pointed polygon cheap.
-  const minY = Math.max(0, Math.ceil(Math.min(...ys) - 0.5))
-  const maxY = Math.min(height - 1, Math.floor(Math.max(...ys) - 0.5))
+  // Reduced rather than spread. The spread form is the natural way to write
+  // this and is what it used to be, but it scales with the argument count up to
+  // the engine's limit and then throws - so the bounds are walked instead. The
+  // point count is already capped above, which keeps this loop trivial.
+  let minOfY = Number.POSITIVE_INFINITY
+  let maxOfY = Number.NEGATIVE_INFINITY
+  for (const y of ys) {
+    if (y < minOfY) minOfY = y
+    if (y > maxOfY) maxOfY = y
+  }
+  const minY = Math.max(0, Math.ceil(minOfY - 0.5))
+  const maxY = Math.min(height - 1, Math.floor(maxOfY - 0.5))
 
   for (let y = minY; y <= maxY; y++) {
     // The horizontal line through the centre of row y. Comparing the vertices

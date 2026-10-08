@@ -2,7 +2,11 @@ import { useEffect, useMemo } from 'react'
 import { create } from 'zustand'
 import { DEFAULT_SETTINGS, comparePhotos, type DriveInfo, type Photo, type ScanProgress, type ScanResult, type Settings, type SmartCollection, type SmartCollectionRule, type SortDir, type SortKey } from '@shared/protocol'
 import { normalizeTags } from '@shared/ai-tags'
+import { clampDockWidth } from '@shared/dock-width'
+import { parentDir } from '@shared/paths'
 import type { SimilarHit } from '@shared/ai-similar'
+import type { AiDockTab, AiLibrarySnapshot, AiToolActivity } from '@shared/ai-types'
+import { takeRecentHistory } from '@shared/ai-types'
 import { bridge } from '@/lib/bridge'
 
 export type ScanStatus = 'idle' | 'scanning' | 'ready' | 'error'
@@ -52,6 +56,8 @@ interface LibraryState {
   showInfo: boolean
   showShortcuts: boolean
   showSettings: boolean
+  /** Creatives as a top-level page, next to the library rather than inside the dock. */
+  showCreatives: boolean
   /** Whether the terminal drawer is showing. Its shells keep running when hidden. */
   terminalOpen: boolean
   query: string
@@ -72,12 +78,23 @@ interface LibraryState {
   // AI
   aiDockExpanded: boolean
   aiDockWidth: number
-  aiOpen: boolean
   aiThinking: boolean
+  /**
+   * Identifies the latest chat request.
+   *
+   * Deltas arrive on one shared channel, so a piece from a stopped answer can
+   * otherwise land in the next one. Every send and every stop moves this number,
+   * and anything tagged with an older one is ignored.
+   */
+  aiRequestId: number
+  /** What tool the assistant is running right now, or null between tools. */
+  aiActivity: AiToolActivity | null
   aiModelReady: boolean
   aiVisionReady: boolean
   /** True while a batch of tags is being generated. */
   aiTagging: boolean
+  /** Why the last tag run produced nothing, when it says so instead. */
+  aiTagNote: string | null
   /** True while a similarity search is in flight. */
   aiSimilarBusy: boolean
   /** The last similarity search: the photo searched from and its hits. */
@@ -105,6 +122,8 @@ interface LibraryState {
   cancelScan: () => Promise<void>
   /** Shows the file Windows handed us and focuses its folder in the grid. */
   openFiles: (paths: string[]) => Promise<void>
+  /** Re-points the library at a folder handed over on the command line. */
+  openFolders: (folders: string[]) => Promise<void>
   patch: (patch: Partial<Settings>) => Promise<void>
   setSort: (key: SortKey) => void
   setQuery: (query: string) => void
@@ -172,15 +191,35 @@ interface LibraryState {
   toggleInfo: () => void
   toggleShortcuts: () => void
   setShowSettings: (open: boolean) => void
+  setShowCreatives: (open: boolean) => void
   setTerminalOpen: (open: boolean) => void
   toggleTerminal: () => void
 
   // AI dock
   toggleAi: () => void
   setAiDockExpanded: (expanded: boolean) => void
-  setAiDockWidth: (width: number) => void
+  setAiDockWidth: (width: number, viewportWidth?: number) => void
+  /**
+   * Opens the assistant from the outside (CLI `--chat`, tray): back to the
+   * library, dock expanded, and a bump callers watch to select the chat tab.
+   */
+  openChat: () => void
+  /** Counts `openChat` calls so the dock can react exactly once per request. */
+  chatRequest: number
   sendAiMessage: (text: string) => Promise<void>
+  /** Stops the in-flight answer and invalidates its remaining pieces. */
+  cancelAiMessage: () => void
+  /** Re-asks the last user question, discarding the failed answer after it. */
+  retryAiMessage: () => void
+  /** Which dock view is showing; stored so page switches keep it, not reset it. */
+  aiDockTab: AiDockTab
+  setAiDockTab: (tab: AiDockTab) => void
+  /** The unsent composer text; stored so page switches keep it, not eat it. */
+  aiDraft: string
+  setAiDraft: (draft: string) => void
   appendAiDelta: (delta: string) => void
+  /** Records which tool the assistant is running, or null when the gap is over. */
+  setAiActivity: (activity: AiToolActivity | null) => void
   /** Merges tag suggestions into the per-photo map and persists them. */
   mergePhotoTags: (entries: Array<{ path: string; tags: string[] }>) => void
   /** Replaces the tags of one photo; an empty list removes them. */
@@ -197,20 +236,80 @@ function sortPhotos(raw: Photo[], key: SortKey, dir: SortDir): Photo[] {
 }
 
 /**
- * Directory containing a path.
+ * How many library entries ride along with a question.
  *
- * Written out rather than imported from `node:path` because this module runs in
- * the renderer, which is sandboxed and has no Node builtins. The rules here are
- * only the ones Windows paths actually follow: separators, and a drive root with
- * nothing after it.
+ * The assistant's tools search this list rather than the disk. Main holds no scan
+ * of its own, and re-walking a drive mid-answer would cost seconds on a large
+ * library for a name lookup. A few thousand names is comfortably more than a
+ * person can usefully ask about, and `included` is reported honestly so a tool
+ * never claims to have searched a library it could not see.
  */
-function parentDir(path: string): string {
-  const trimmed = path.replace(/[\\/]+$/, '')
-  const cut = Math.max(trimmed.lastIndexOf('\\'), trimmed.lastIndexOf('/'))
-  if (cut < 0) return trimmed
-  // Keep the separator when what remains is a bare drive root like "C:".
-  if (cut <= 2) return trimmed.slice(0, 3)
-  return trimmed.slice(0, cut)
+const AI_LIBRARY_ENTRIES = 2000
+
+/**
+ * The last snapshot handed to the assistant, and the library it was built from.
+ *
+ * Rebuilding 2,000 entries per question is waste for a library that has not
+ * changed since the last one. The raw array identity only changes on a scan or
+ * a deletion, so reusing the snapshot while it holds is exact, not approximate.
+ */
+let snapshotCache: { raw: Photo[]; root: string; snapshot: AiLibrarySnapshot } | null = null
+
+function cachedLibrarySnapshot(state: {
+  raw: Photo[]
+  scanInfo: Omit<ScanResult, 'photos'> | null
+}): AiLibrarySnapshot {
+  const root = state.scanInfo?.root ?? ''
+  if (snapshotCache && snapshotCache.raw === state.raw && snapshotCache.root === root) {
+    return snapshotCache.snapshot
+  }
+  const snapshot = librarySnapshot(state)
+  snapshotCache = { raw: state.raw, root, snapshot }
+  return snapshot
+}
+
+function librarySnapshot(state: {
+  raw: Photo[]
+  scanInfo: Omit<ScanResult, 'photos'> | null
+}): AiLibrarySnapshot {
+  // Reduced over the whole library before the cap, because the assistant is told
+  // these numbers as facts about the user's collection. Counting the 2,000
+  // entries that get sent instead would report "pictures: 2000" for a library of
+  // fifty thousand, and the user is the one who has to hear that.
+  //
+  // One pass over the full array, so this is O(n) on the entire library rather
+  // than the slice - still far cheaper than sending the entries themselves, and
+  // `cachedLibrarySnapshot` means it runs once per scan rather than per question.
+  let photos = 0
+  let videos = 0
+  let bytes = 0
+  let oldest: number | null = null
+  let newest: number | null = null
+  for (const photo of state.raw) {
+    if (photo.kind === 'video') videos += 1
+    else photos += 1
+    bytes += photo.bytes
+    if (photo.mtime > 0) {
+      if (oldest === null || photo.mtime < oldest) oldest = photo.mtime
+      if (newest === null || photo.mtime > newest) newest = photo.mtime
+    }
+  }
+
+  return {
+    root: state.scanInfo?.root ?? '',
+    total: state.raw.length,
+    included: Math.min(state.raw.length, AI_LIBRARY_ENTRIES),
+    totals: { photos, videos, bytes, oldest, newest },
+    entries: state.raw.slice(0, AI_LIBRARY_ENTRIES).map((photo) => ({
+      name: photo.name,
+      path: photo.path,
+      kind: photo.kind,
+      bytes: photo.bytes,
+      mtime: photo.mtime,
+      width: photo.width,
+      height: photo.height
+    }))
+  }
 }
 
 /** Everything that narrows the library, combined with AND. */
@@ -365,7 +464,7 @@ function matchesRule(
       return photo.bytes === wanted
     }
     default:
-      return true
+      return false
   }
 }
 
@@ -457,10 +556,22 @@ function applyScanResult(
   const { photos: raw, ...rest } = result
   const { settings } = get()
   const photos = sortPhotos(raw, settings.sortKey, settings.sortDir)
+  // A new walk replaces the library, so per-file EXIF reads from the old one are
+  // pruned to what still exists: keeping entries for deleted files would serve
+  // stale metadata. Tags are deliberately left alone - they are the user's own
+  // data, and switching folders must not erase them.
+  const alive = new Set(raw.map((photo) => photo.path))
+  const exifCache = new Map<string, unknown>()
+  for (const [path, data] of get().exifCache) {
+    if (alive.has(path)) exifCache.set(path, data)
+  }
+  const photoTags = get().photoTags
   set({
     raw,
     photos,
-    visible: visibleIndices(photos, criteriaOf(get()), get().photoTags, get().exifCache),
+    visible: visibleIndices(photos, criteriaOf(get()), photoTags, exifCache),
+    exifCache,
+    photoTags,
     status: 'ready',
     error: null,
     // Computer mode walks every drive, so there is no single root to report; the
@@ -495,6 +606,7 @@ export const useLibrary = create<LibraryState>((set, get) => ({
   showInfo: false,
   showShortcuts: false,
   showSettings: false,
+  showCreatives: false,
   terminalOpen: false,
   query: '',
 
@@ -511,11 +623,16 @@ export const useLibrary = create<LibraryState>((set, get) => ({
 
   aiDockExpanded: initial.aiDockExpanded ?? true,
   aiDockWidth: initial.aiDockWidth ?? 360,
-  aiOpen: initial.aiDockExpanded ?? true,
+  aiDockTab: 'chat',
+  aiDraft: '',
+  chatRequest: 0,
   aiThinking: false,
+  aiRequestId: 0,
+  aiActivity: null,
   aiModelReady: false,
   aiVisionReady: false,
   aiTagging: false,
+  aiTagNote: null,
   aiSimilarBusy: false,
   aiSimilar: null,
   aiMessages: [],
@@ -645,6 +762,18 @@ export const useLibrary = create<LibraryState>((set, get) => ({
     set({ selected, cursor: indices[0]!, anchor: indices[0]!, openIndex: indices[0]! })
   },
 
+  async openFolders(folders) {
+    // A folder on the command line is the user choosing a source, the same as
+    // picking one in the folder dialog. The first wins when several arrive:
+    // the library has one root, and silently scanning one of several folders
+    // would be a worse surprise than saying which one was taken.
+    const folder = folders.find((entry) => entry.trim() !== '')
+    if (!folder) return
+    const { settings } = get()
+    if (settings.root === folder && settings.scanMode === 'folder') return
+    await get().patch({ root: folder, scanMode: 'folder' })
+  },
+
   async pickFolder() {
     const result = await bridge.library.pick()
     if (result.canceled || !result.path) return
@@ -669,13 +798,53 @@ export const useLibrary = create<LibraryState>((set, get) => ({
         ? state.activeCollectionId
         : null
     const criteria = { ...criteriaOf(state), collectionRules: collections.find((c) => c.id === activeCollectionId && c.enabled)?.rules ?? null }
+    // Only re-filter when the inputs to filtering actually changed. `visible` is
+    // stored state rather than a derived selector, so recomputing it here rebuilt
+    // the whole thing on every settings patch - and `patch` is the funnel for
+    // collapsing the AI dock, resizing it, opening the chat, editing a collection
+    // name. Each of those ran an O(n) pass over the library, allocated a new
+    // `visible`, and invalidated `useVisibleEntries`, which allocates a fresh
+    // entry object per photo and so re-ran `layoutJustified` over everything.
+    // Collapsing the dock is a single click and was costing a full relayout.
+    //
+    // The inputs are: the sort (which reorders, so the index list changes), the
+    // tags a rule can match on, and a collection's rules. Everything else in a
+    // patch - dock width, expanded, slideshow interval, theme - cannot change
+    // which photos match.
+    const filterInputsChanged = sortChanged || patch.aiTags !== undefined || patch.aiCollections !== undefined
+    const visible = filterInputsChanged
+      ? visibleIndices(photos, criteria, photoTags, state.exifCache)
+      : state.visible
+    // Reordering the sort changes what an index means, so `visible` cannot keep
+    // the old list even when nothing about membership was filtered differently -
+    // it is a list of positions into `photos`, and those positions have moved.
+    // `moved` is built either way because the cursor remap below needs it.
+    // Sorting reorders the same photos rather than replacing them, so cursor,
+    // selection and viewer references follow their photos instead of staying at
+    // stale positions. Paths identify the photo because the set did not change.
+    const moved = new Map(photos.map((photo, index) => [photo.path, index] as const))
+    const remapIndex = (index: number): number => {
+      if (index < 0) return -1
+      const photo = state.photos[index]
+      if (!photo) return -1
+      return moved.get(photo.path) ?? -1
+    }
+    const selected = new Set<number>()
+    for (const index of state.selected) {
+      const found = remapIndex(index)
+      if (found >= 0) selected.add(found)
+    }
     set({
       settings,
       collections,
       activeCollectionId,
       photos,
       photoTags,
-      visible: visibleIndices(photos, criteria, photoTags, state.exifCache)
+      visible,
+      cursor: remapIndex(state.cursor),
+      anchor: remapIndex(state.anchor),
+      selected,
+      openIndex: state.openIndex === null ? null : remapIndex(state.openIndex)
     })
     // Which source and how deep to walk both decide what exists on disk, so any
     // change to them has to re-read from disk rather than relabel the old set.
@@ -733,22 +902,48 @@ export const useLibrary = create<LibraryState>((set, get) => ({
     })
   },
 
+  /**
+   * Records one picture's EXIF and refreshes the view if that can change what
+   * matches a camera filter or collection rule.
+   *
+   * Read `state` once, after any await, and derive both writes from that single
+   * snapshot. Building the new Map from a pre-await read instead loses updates
+   * when two reads overlap - which is easy to trigger by expanding EXIF on one
+   * picture and then another before the first returns: both take the same base
+   * Map, and whichever writes second erases the other's entry, so that picture
+   * silently re-reads from disk on the next expand.
+   *
+   * Exported because the MCP and the dock read cached metadata too; the store
+   * itself is the only thing that may write it.
+   */
   setExif(path, data) {
-    set({ exifCache: new Map(get().exifCache).set(path, data) })
+    const state = get()
+    const exifCache = new Map(state.exifCache).set(path, data)
+    const cameraRuleActive =
+      state.cameraFilter.trim() !== '' ||
+      state.collections.some(
+        (c) => c.enabled && c.id === state.activeCollectionId && c.rules.some((r) => r.field.startsWith('camera'))
+      )
+    if (!cameraRuleActive) {
+      set({ exifCache })
+      return
+    }
+    // A newly known camera can change what matches, so the view is recomputed -
+    // but from the map that is about to be stored, not from the pre-write one,
+    // so the recompute sees the value it is being done for.
+    set({
+      exifCache,
+      visible: visibleIndices(state.photos, criteriaOf(state), state.photoTags, exifCache)
+    })
   },
 
   async loadExif(path) {
     const cached = get().exifCache.get(path)
     if (cached !== undefined) return cached
     const data = await bridge.library.exif(path)
-    const state = get()
-    set({ exifCache: new Map(state.exifCache).set(path, data) })
-    // A newly known camera can change what matches the camera filter or a
-    // collection rule, so recompute the view without disturbing the selection.
-    if (state.cameraFilter.trim() !== '' || state.collections.some((c) => c.enabled && c.id === state.activeCollectionId && c.rules.some((r) => r.field.startsWith('camera')))) {
-      const next = get()
-      set({ visible: visibleIndices(next.photos, criteriaOf(next), next.photoTags, next.exifCache) })
-    }
+    // Re-read the store *after* the await, so a second read that landed first is
+    // carried forward rather than overwritten by this one.
+    get().setExif(path, data)
     return data
   },
 
@@ -826,10 +1021,28 @@ export const useLibrary = create<LibraryState>((set, get) => ({
       if (current.has(index)) selected.delete(index)
       else selected.add(index)
     } else {
+      // Range walks `visible`, not library indices. Walking the raw span would
+      // sweep in every filtered-out photo between the two endpoints, and the
+      // selection bar hands `selected` straight to the Recycle Bin with no
+      // second look - so a shift-click under a filter could bin thousands of
+      // pictures nobody ever saw. `visible` is ascending, so the anchors can be
+      // resolved by position and the span taken between them.
+      const { visible } = get()
       const from = anchor < 0 ? index : anchor
-      const lo = Math.min(from, index)
-      const hi = Math.max(from, index)
-      for (let i = lo; i <= hi; i++) selected.add(i)
+      const startAt = visible.indexOf(from)
+      const endAt = visible.indexOf(index)
+      if (startAt < 0 || endAt < 0) {
+        // One endpoint is filtered out, so there is no row range to describe.
+        // Taking just the clicked tile is the only honest answer available.
+        selected.add(index)
+      } else {
+        const lo = Math.min(startAt, endAt)
+        const hi = Math.max(startAt, endAt)
+        for (let i = lo; i <= hi; i++) {
+          const member = visible[i]
+          if (member !== undefined) selected.add(member)
+        }
+      }
     }
     set({ cursor: index, anchor: mode === 'range' ? anchor : index, selected })
   },
@@ -950,10 +1163,18 @@ export const useLibrary = create<LibraryState>((set, get) => ({
           ? { openIndex: null, slideshowPlaying: false, showInfo: false }
           : { openIndex: remap(photos[openIndex]?.path) }
 
+    // EXIF reads for deleted files go with them. Tags stay: they are user data,
+    // and the settings record keeps them for a file that comes back.
+    const exifCache = new Map<string, unknown>()
+    for (const [path, data] of get().exifCache) {
+      if (!gone.has(path.toLowerCase())) exifCache.set(path, data)
+    }
+
     set({
       raw: nextRaw,
       photos: nextPhotos,
-      visible: visibleIndices(nextPhotos, criteriaOf(get()), get().photoTags, get().exifCache),
+      visible: visibleIndices(nextPhotos, criteriaOf(get()), get().photoTags, exifCache),
+      exifCache,
       cursor: settle(cursor),
       anchor: settle(anchor),
       selected: nextSelected,
@@ -975,15 +1196,28 @@ export const useLibrary = create<LibraryState>((set, get) => ({
   },
 
   learnClip(index, media) {
-    const { photos } = get()
+    const { photos, raw } = get()
     const current = photos[index]
     // A failed or zero-length read leaves the item exactly as the scan wrote it,
     // which is better than storing a width of 0 next to a real duration.
     if (!current || current.kind !== 'video') return
     if (media.width <= 0 || media.height <= 0) return
-    const next = [...photos]
-    next[index] = { ...current, ...media }
-    set({ photos: next })
+    // `raw` is written too, not just `photos`. Changing the sort re-derives
+    // `photos` from `raw`, so a measurement kept only in `photos` was thrown
+    // away on the next sort change and every clip fell back to the scan's
+    // width and height of 0 - which is the whole state this call exists to
+    // avoid. `photos` is written directly because re-sorting here would move
+    // the item the caller just measured out from under `index`.
+    const nextPhotos = [...photos]
+    nextPhotos[index] = { ...current, ...media }
+    const rawIndex = raw.findIndex((item) => item.path === current.path)
+    if (rawIndex < 0) {
+      set({ photos: nextPhotos })
+      return
+    }
+    const nextRaw = [...raw]
+    nextRaw[rawIndex] = { ...raw[rawIndex]!, ...media }
+    set({ photos: nextPhotos, raw: nextRaw })
   },
 
   setSlideshow(playing) {
@@ -1020,8 +1254,17 @@ export const useLibrary = create<LibraryState>((set, get) => ({
     set({ showShortcuts: !get().showShortcuts })
   },
 
+  // Settings and Creatives are both full pages, so only one can be showing. Each
+  // close is written into the other rather than left to whoever renders them,
+  // which keeps the two flags from ever disagreeing about what is on screen.
   setShowSettings(open) {
-    set({ showSettings: open })
+    // Opening a full page unmounts the viewer, so close it explicitly. Leaving
+    // its index behind would resurrect the viewer when the library returns.
+    set(open ? { showSettings: true, showCreatives: false, openIndex: null, slideshowPlaying: false, showInfo: false } : { showSettings: false })
+  },
+
+  setShowCreatives(open) {
+    set(open ? { showCreatives: true, showSettings: false, openIndex: null, slideshowPlaying: false, showInfo: false } : { showCreatives: false })
   },
 
   setTerminalOpen(open) {
@@ -1032,19 +1275,46 @@ export const useLibrary = create<LibraryState>((set, get) => ({
     set({ terminalOpen: !get().terminalOpen })
   },
 
+  // One flag for the dock. It used to be mirrored into a second `aiOpen` that
+  // nothing read, which meant two sources of truth for one panel and a collapse
+  // that could be undone by whichever one was written last.
   toggleAi() {
-    const next = !get().aiOpen
-    set({ aiOpen: next, aiDockExpanded: next })
+    const next = !get().aiDockExpanded
+    set({ aiDockExpanded: next })
     void get().patch({ aiDockExpanded: next })
   },
 
   setAiDockExpanded(expanded) {
-    set({ aiDockExpanded: expanded, aiOpen: expanded })
+    set({ aiDockExpanded: expanded })
     void get().patch({ aiDockExpanded: expanded })
   },
 
-  setAiDockWidth(width) {
-    const clamped = Math.min(720, Math.max(240, Math.round(width)))
+  openChat() {
+    // A chat request answered behind the viewer or a settings page is no answer
+    // at all, so this always lands back on the library with the dock expanded.
+    // The tab switch and composer focus happen in the dock, which watches
+    // `chatRequest` - it owns both, and it may not even be mounted right now.
+    set({
+      showSettings: false,
+      showCreatives: false,
+      openIndex: null,
+      slideshowPlaying: false,
+      showInfo: false,
+      aiDockExpanded: true,
+      chatRequest: get().chatRequest + 1
+    })
+    void get().patch({ aiDockExpanded: true })
+  },
+
+  setAiDockWidth(width, viewportWidth?) {
+    // A drag commits an explicit width for the viewport it happened in. When the
+    // viewport is known, the shared clamp keeps the persisted preference inside
+    // the same rule the screen uses; when it is not known, keep the historical
+    // 240-720 clamp so older callers do not change behavior.
+    const clamped =
+      viewportWidth === undefined
+        ? Math.min(720, Math.max(240, Math.round(width)))
+        : clampDockWidth(width, viewportWidth)
     set({ aiDockWidth: clamped })
     void get().patch({ aiDockWidth: clamped })
   },
@@ -1063,29 +1333,57 @@ export const useLibrary = create<LibraryState>((set, get) => ({
     })
   },
 
+  setAiActivity(activity) {
+    set({ aiActivity: activity })
+  },
+
   async sendAiMessage(text) {
     const message = text.trim()
     if (message === '') return
     const state = get()
+    // The dock disables its send button while thinking, but two submits can still
+    // arrive before React re-renders. Checking the store synchronously here is
+    // what makes the second one a no-op instead of a second interleaved stream.
+    if (state.aiThinking) return
+    const requestId = state.aiRequestId + 1
     // Only pictures are sent: main can decode those into the vision request, and
     // the note about the selection should not promise the model saw a video.
     const paths = Array.from(state.selected)
       .map((index) => state.photos[index])
       .filter((photo): photo is NonNullable<typeof photo> => photo?.kind === 'photo')
       .map((photo) => photo.path)
-    const history = state.aiMessages.slice(-12).map((turn) => ({ role: turn.role, content: turn.content }))
+    const history = takeRecentHistory(
+      state.aiMessages.map((turn) => ({ role: turn.role, content: turn.content }))
+    )
     set({
+      aiRequestId: requestId,
       aiMessages: [
         ...state.aiMessages,
         { role: 'user', content: message },
         { role: 'assistant', content: '' }
       ],
-      aiThinking: true
+      aiThinking: true,
+      aiActivity: null
     })
+    const current = (): boolean => get().aiRequestId === requestId
     try {
-      const reply = await bridge.ai.chat(message, { paths, history })
-      set((current) => {
-        const messages = current.aiMessages.slice()
+      const reply = await bridge.ai.chat(message, { paths, history, library: cachedLibrarySnapshot(state) }, requestId)
+      // A newer send or an explicit stop has taken over since this request left.
+      // Landing its ending here would overwrite whatever the user asked next.
+      if (!current()) return
+      if (reply.cancelled) {
+        set((stale) => {
+          const messages = stale.aiMessages.slice()
+          const last = messages[messages.length - 1]
+          if (last && last.role === 'assistant' && last.content === '') {
+            messages[messages.length - 1] = { ...last, content: 'Stopped.' }
+          }
+          return { aiMessages: messages, aiThinking: false, aiActivity: null }
+        })
+        return
+      }
+      set((stale) => {
+        const messages = stale.aiMessages.slice()
         const last = messages[messages.length - 1]
         if (last && last.role === 'assistant') {
           messages[messages.length - 1] = {
@@ -1096,9 +1394,10 @@ export const useLibrary = create<LibraryState>((set, get) => ({
         return { aiMessages: messages, aiThinking: false }
       })
     } catch (error) {
+      if (!current()) return
       const detail = error instanceof Error ? error.message : String(error)
-      set((current) => {
-        const messages = current.aiMessages.slice()
+      set((stale) => {
+        const messages = stale.aiMessages.slice()
         const last = messages[messages.length - 1]
         const note = `Error: ${detail}`
         if (last && last.role === 'assistant' && last.content === '') {
@@ -1109,6 +1408,46 @@ export const useLibrary = create<LibraryState>((set, get) => ({
         return { aiMessages: messages, aiThinking: false }
       })
     }
+  },
+
+  cancelAiMessage() {
+    const state = get()
+    if (!state.aiThinking) return
+    const cancelledId = state.aiRequestId
+    // Invalidate first, then tell main to stop: anything already on its way back
+    // carries the old ID and is ignored, so stopping cannot corrupt the next
+    // answer the user starts immediately afterwards.
+    set((current) => {
+      const messages = current.aiMessages.slice()
+      const last = messages[messages.length - 1]
+      if (last && last.role === 'assistant' && last.content === '') {
+        messages[messages.length - 1] = { ...last, content: 'Stopped.' }
+      }
+      return { aiRequestId: cancelledId + 1, aiMessages: messages, aiThinking: false, aiActivity: null }
+    })
+    void bridge.ai.cancel(cancelledId).catch(() => {})
+  },
+
+  retryAiMessage() {
+    const state = get()
+    if (state.aiThinking) return
+    // Walk back to the last thing the user asked: anything after it - a failed
+    // answer, a stopped one - is discarded, and the question goes again
+    // unchanged through the normal send path.
+    let at = state.aiMessages.length - 1
+    while (at >= 0 && state.aiMessages[at]!.role !== 'user') at--
+    if (at < 0) return
+    const text = state.aiMessages[at]!.content
+    set({ aiMessages: state.aiMessages.slice(0, at) })
+    void get().sendAiMessage(text)
+  },
+
+  setAiDockTab(tab) {
+    set({ aiDockTab: tab })
+  },
+
+  setAiDraft(draft) {
+    set({ aiDraft: draft })
   },
 
   mergePhotoTags(entries) {
@@ -1137,12 +1476,16 @@ export const useLibrary = create<LibraryState>((set, get) => ({
       .slice(0, AUTOTAG_LIMIT)
       .map((photo) => ({ id: photo.path, path: photo.path }))
     if (targets.length === 0) return 0
-    set({ aiTagging: true })
+    set({ aiTagging: true, aiTagNote: null })
     try {
       const results = await bridge.ai.autotag(targets)
       get().mergePhotoTags(results.map((result) => ({ path: result.photoId, tags: result.tags })))
       return results.filter((result) => result.tags.length > 0).length
-    } catch {
+    } catch (error) {
+      // A refusal (agent tools blocked) and a real failure both used to read as
+      // "0 tagged" with no explanation. The note says which one it was.
+      const detail = error instanceof Error ? error.message : String(error)
+      set({ aiTagNote: detail })
       return 0
     } finally {
       set({ aiTagging: false })
@@ -1201,8 +1544,57 @@ export function useOpenFilesSubscription(): void {
  */
 export function useAiDeltaSubscription(): void {
   useEffect(() => {
-    return bridge.ai.onDelta((delta) => {
-      useLibrary.getState().appendAiDelta(delta)
+    return bridge.ai.onDelta((update) => {
+      const state = useLibrary.getState()
+      if (update.requestId !== state.aiRequestId) return
+      state.appendAiDelta(update.delta)
+    })
+  }, [])
+}
+
+/**
+ * Which tool the assistant is running, for the stretch of a reply where no text
+ * is arriving.
+ *
+ * A search takes seconds and produces nothing to stream, so without this the dock
+ * sits on "Thinking…" while the model works and the user cannot tell a slow tool
+ * from a stuck one.
+ */
+export function useAiToolSubscription(): void {
+  useEffect(() => {
+    return bridge.ai.onTool((update) => {
+      const state = useLibrary.getState()
+      if (update.requestId !== state.aiRequestId) return
+      state.setAiActivity(update.activity)
+    })
+  }, [])
+}
+
+/**
+ * Opens the assistant on an outside request, for the life of the window.
+ *
+ * Owned here rather than in the dock because the dock unmounts on the Settings
+ * and Creatives pages: a `--chat` that arrives there still has to land on the
+ * library first, which only the store can do.
+ */
+export function useOpenChatSubscription(): void {
+  useEffect(() => {
+    return bridge.onOpenChat(() => {
+      useLibrary.getState().openChat()
+    })
+  }, [])
+}
+
+/**
+ * Re-points the library at a command-line folder, for the life of the window.
+ *
+ * Owned here next to the files subscription for the same reason: the listener
+ * has to exist from the first paint, whatever page is showing.
+ */
+export function useOpenFoldersSubscription(): void {
+  useEffect(() => {
+    return bridge.library.onOpenFolders((folders) => {
+      void useLibrary.getState().openFolders(folders)
     })
   }, [])
 }

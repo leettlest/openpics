@@ -17,10 +17,8 @@
  */
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { dirname, join } from 'node:path'
+import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-
-const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const DIST = new URL('../dist-test/', import.meta.url)
 if (!existsSync(fileURLToPath(new URL('../dist-test/electron/editing.js', import.meta.url)))) {
   console.error('the test build is missing: dist-test/electron/editing.js\nrun "npm run build:test" first, or use "npm test".')

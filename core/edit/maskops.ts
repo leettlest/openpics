@@ -33,7 +33,6 @@ function minMaxFilter(mask: Mask, radius: number, mode: 'grow' | 'shrink'): Mask
   const { width, height, values } = mask
   const tmp = new Uint8Array(width * height)
   const out = new Uint8Array(width * height)
-  const pick = mode === 'grow' ? Math.max : Math.min
 
   for (let y = 0; y < height; y++) {
     const row = y * width

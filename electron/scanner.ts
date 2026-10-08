@@ -244,7 +244,11 @@ async function walk(opts: WalkOptions, onProgress?: (p: ScanProgress) => void): 
     if (state.canceled || state.truncated) break
   }
 
-  running = null
+  // Only release the slot if it is still ours. A second walk started while this
+  // one was winding down has already claimed `running` with its own token, and
+  // clearing it unconditionally left cancelScan() pointing at nothing - so the
+  // user's Stop button silently did nothing for the rest of that scan.
+  if (running === token) running = null
 
   const result: ScanResult = {
     root: opts.label,

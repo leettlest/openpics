@@ -35,11 +35,6 @@ import {
  * from the same session, which is what makes the filter undoable.
  */
 
-/** Rec. 601 luma, matching `adjustRaster`, so desaturating lands on the same grey. */
-function luma(r: number, g: number, b: number): number {
-  return 0.299 * r + 0.587 * g + 0.114 * b
-}
-
 function clamp01(v: number): number {
   return v < 0 ? 0 : v > 1 ? 1 : v
 }

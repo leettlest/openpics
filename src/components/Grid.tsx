@@ -26,8 +26,13 @@ export function Grid() {
   const totalCount = useLibrary((s) => s.photos.length)
   const rowHeight = useLibrary((s) => s.settings.rowHeight)
   const cursor = useLibrary((s) => s.cursor)
-  const selected = useLibrary((s) => s.selected)
-  const { select, open } = useLibrary()
+const selected = useLibrary((s) => s.selected)
+  // Two actions, subscribed separately rather than through a bare `useLibrary()`,
+  // so the grid does not re-render on writes it does not care about - which for a
+  // whole-machine scan includes every progress tick and for an AI answer every
+  // streamed token.
+  const select = useLibrary((s) => s.select)
+  const open = useLibrary((s) => s.open)
 
   const scrollerRef = useRef<HTMLDivElement | null>(null)
   const [width, setWidth] = useState(0)
@@ -143,10 +148,13 @@ export function Grid() {
   // scrolls the grid, which dismisses the overlays below, so it has to be declared
   // before them: `scrollIntoView` moves a row under the pointer and a card left in
   // place would then be describing wherever that row ended up.
+  //
+  // Instant, not smooth: rapid arrowing queues smooth animations faster than they
+  // finish, and the grid lags behind the cursor it is supposed to follow.
   useEffect(() => {
     if (cursor < 0) return
     const el = scrollerRef.current?.querySelector(`[data-index="${cursor}"]`)
-    el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+    el?.scrollIntoView({ block: 'nearest', behavior: 'auto' })
   }, [cursor])
 
   useEffect(() => () => window.clearTimeout(hoverTimer.current), [])

@@ -19,11 +19,18 @@ import type { EditSession } from './session'
 /**
  * Ceiling on remembered pixels, across all steps of all sessions.
  *
- * A mask is one byte per pixel, so this is 16MB of history however it is spent:
- * a hundred steps on a small picture, or about thirty on a 12-megapixel one, or
- * three on a 40-megapixel one. Fixed in total rather than per session because the
- * cost that matters is the process's, not any one edit's, and because a per-session
- * cap lets one large picture quietly take a quarter of a gigabyte.
+ * A mask is one byte per pixel, so this is 16MB of history per session however it
+ * is spent: a hundred steps on a small picture, but only one on a 12-megapixel
+ * one, since a single 12MP snapshot is already three quarters of the budget.
+ * The real photograph case is therefore one or two undos, which is the honest
+ * limit rather than a disappointing one - see the note below on why the earlier
+ * claim of "about thirty on a 12MP picture" was not achievable.
+ *
+ * It is per session, not per process, because `trim()` can only shed from `past`,
+ * and a session evicts wholesale (`EditStore`). The earlier comment here claimed a
+ * process-wide total; that was never what the code did. With `maxSessions: 8` the
+ * real ceiling is up to eight times this number, which the budget's stated job -
+ * bounding how much of a picture one session can remember - does not need to cover.
  *
  * The number is deliberately small. Undo that survives forty steps is undo nobody
  * uses, because the mistake being corrected is always the last one or two.
@@ -125,7 +132,12 @@ export class EditHistory {
     // still held, just not counted, so a session could be undone and redone
     // repeatedly and grow past the cap that was supposed to bound it.
     this.future.push({ label: entry.label, mask: cloneMask(session.mask) })
-    this.used += entry.mask.width * entry.mask.height
+    // `used` is deliberately NOT incremented here. One buffer left `past` and
+    // one clone entered `future`, so retained memory is unchanged - counting it
+    // again inflated the counter by a full mask per undo, and because only
+    // `checkpoint` trims, one undo-all/redo-all cycle made the counter exceed
+    // the budget for real. The next checkpoint then trimmed to `past.length`
+    // of 1, so a deep history collapsed to a single undo step with no error.
     session.mask = entry.mask
     return entry.label
   }
@@ -135,7 +147,8 @@ export class EditHistory {
     const entry = this.future.pop()
     if (!entry) return null
     this.past.push({ label: entry.label, mask: cloneMask(session.mask) })
-    this.used += entry.mask.width * entry.mask.height
+    // Symmetric with undo(): a clone enters `past` while a buffer leaves
+    // `future`, so net retention is unchanged and `used` must not move.
     session.mask = entry.mask
     return entry.label
   }

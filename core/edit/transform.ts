@@ -260,7 +260,7 @@ export function adjustRaster(raster: Raster, options: AdjustOptions): Raster {
     let r = raster.data[o]!
     let g = raster.data[o + 1]!
     let b = raster.data[o + 2]!
-    let a = raster.data[o + 3]!
+    const a = raster.data[o + 3]!
 
     if (brightness !== 0) { r += brightness; g += brightness; b += brightness }
     if (contrast !== 0) {

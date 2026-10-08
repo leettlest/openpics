@@ -1,5 +1,5 @@
 import { existsSync, readdirSync } from 'node:fs'
-import { join, extname, basename } from 'node:path'
+import { join, extname } from 'node:path'
 import { getModelsDir } from './paths'
 
 export type AiModelInfo = {

@@ -12,6 +12,7 @@ import {
 } from '@phosphor-icons/react'
 import { bridge } from '@/lib/bridge'
 import { useLibrary, type PhotoEntry } from '@/store/library'
+import { basenameOf } from '@shared/paths'
 
 const EDGE = 6
 
@@ -46,11 +47,6 @@ interface PhotoContextMenuProps {
  */
 const DECODABLE = new Set(['jpg', 'jpeg', 'jpe', 'jfif', 'png', 'gif', 'bmp', 'tif', 'tiff'])
 
-function basenameOf(path: string): string {
-  const cut = Math.max(path.lastIndexOf('\\'), path.lastIndexOf('/'))
-  return cut < 0 ? path : path.slice(cut + 1)
-}
-
 /**
  * A right-click menu for pictures in the grid.
  *
@@ -59,17 +55,57 @@ function basenameOf(path: string): string {
  * anything anchored inside it.
  */
 export function PhotoContextMenu({ request, onClose }: PhotoContextMenuProps) {
-  const { open, openForEdit, toggleInfo, select, forgetPaths } = useLibrary()
+  /**
+   * Nothing to act on, so render nothing.
+   *
+   * The empty check lives in this wrapper rather than in the component below,
+   * and that placement is the whole point. React requires a mounted component to
+   * call the same hooks in the same order on every render, so a conditional early
+   * return inside it - before some hooks and after others - changes the hook count
+   * mid-life and React throws "Rendered fewer hooks than expected" at the user.
+   * That was the actual state of this file: the guard sat after `useCallback` and
+   * before `useState`, `useLayoutEffect` and `useEffect`.
+   *
+   * Splitting it out makes the guarantee structural instead of a matter of
+   * remembering where to put the check. `Menu` is only ever mounted with a
+   * non-empty list, and it runs an unconditional hook sequence from its first
+   * line, so there is no ordering to get wrong. Nothing is remounted on the way
+   * through, because the grid resolves a non-empty target list before opening a
+   * menu and dismiss unmounts it rather than emptying it - and even if it did
+   * re-render empty, the wrapper returns null and `Menu` unmounts cleanly instead
+   * of running a different number of hooks.
+   *
+   * Kept rather than deleted even though the grid already guarantees it: the
+   * guard narrows `entries` to a non-empty tuple for the component below, and
+   * this file should not have to trust that guarantee continuing to hold.
+   */
+  if (request.entries.length === 0) return null
+  return <Menu request={request} onClose={onClose} />
+}
+
+/**
+ * The menu itself, always mounted with at least one target.
+ *
+ * Every hook in this component is unconditional and in a fixed order.
+ */
+function Menu({ request, onClose }: PhotoContextMenuProps) {
+  const entries = request.entries
+
+  // Actions only; see the note in App.tsx. This menu is mounted over the grid, so
+  // a whole-store subscription would re-render it on every scan progress tick.
+  const open = useLibrary((s) => s.open)
+  const openForEdit = useLibrary((s) => s.openForEdit)
+  const toggleInfo = useLibrary((s) => s.toggleInfo)
+  const select = useLibrary((s) => s.select)
+  const forgetPaths = useLibrary((s) => s.forgetPaths)
   const [confirming, setConfirming] = useState(false)
   const [busy, setBusy] = useState(false)
   const [failures, setFailures] = useState<string[]>([])
   const [notice, setNotice] = useState<string | null>(null)
   const ref = useRef<HTMLDivElement>(null)
 
-  const entries = request.entries
-  const first = entries[0]
+  const first = entries[0]!
   const many = entries.length > 1
-  if (!first) return null
 
   /**
    * Deletes every target and drops the ones that worked from the library.
@@ -241,7 +277,11 @@ export function PhotoContextMenu({ request, onClose }: PhotoContextMenuProps) {
   // Clicking away, scrolling, a resize or Escape all dismiss it, the way a native
   // menu behaves. Without these a menu can be left open over a picture that has
   // since scrolled away, and its rows would act on a selection that moved on.
+  // Arrow keys walk the rows and focus returns to the grid on dismiss, so the
+  // menu is operable without a pointer instead of trapping keyboard users out.
   useEffect(() => {
+    const returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    ref.current?.querySelector<HTMLButtonElement>('button:not([disabled])')?.focus()
     const dismiss = (): void => onClose()
     const onDown = (event: PointerEvent): void => {
       // A press inside the menu is a choice being made, not a dismissal. This
@@ -252,12 +292,31 @@ export function PhotoContextMenu({ request, onClose }: PhotoContextMenuProps) {
       dismiss()
     }
     const onKey = (event: KeyboardEvent): void => {
-      if (event.key !== 'Escape') return
-      // Stopped here so the grid's own Escape handler does not also run and reset
-      // the selection the menu was aimed at.
+      if (event.key === 'Escape') {
+        // Stopped here so the grid's own Escape handler does not also run and reset
+        // the selection the menu was aimed at.
+        event.preventDefault()
+        event.stopPropagation()
+        onClose()
+        return
+      }
+      if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp' && event.key !== 'Home' && event.key !== 'End') {
+        return
+      }
+      const rows = [...(ref.current?.querySelectorAll<HTMLButtonElement>('button:not([disabled])') ?? [])]
+      if (rows.length === 0) return
       event.preventDefault()
       event.stopPropagation()
-      onClose()
+      const at = rows.indexOf(document.activeElement as HTMLButtonElement)
+      const next =
+        event.key === 'ArrowDown'
+          ? (at + 1) % rows.length
+          : event.key === 'ArrowUp'
+            ? (at - 1 + rows.length) % rows.length
+            : event.key === 'Home'
+              ? 0
+              : rows.length - 1
+      rows[next]!.focus()
     }
     window.addEventListener('pointerdown', onDown, true)
     window.addEventListener('resize', dismiss)
@@ -268,6 +327,7 @@ export function PhotoContextMenu({ request, onClose }: PhotoContextMenuProps) {
       window.removeEventListener('resize', dismiss)
       window.removeEventListener('keydown', onKey, true)
       document.removeEventListener('scroll', dismiss, true)
+      returnFocus?.focus()
     }
   }, [onClose])
 

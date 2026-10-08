@@ -1,5 +1,5 @@
 import { X } from '@phosphor-icons/react'
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import { useLibrary } from '@/store/library'
 
 const GROUPS: { title: string; items: [string, string][] }[] = [
@@ -29,6 +29,9 @@ const GROUPS: { title: string; items: [string, string][] }[] = [
       ['Double click', 'switch between fit and 1:1'],
       ['Drag', 'pan while zoomed in'],
       ['Arrows when zoomed', 'pan instead of navigating'],
+      ['K', 'play or pause the clip'],
+      ['J / L', 'back or forward ten seconds'],
+      [', / .', 'step one frame back or forward'],
       ['E', 'edit the background away'],
       ['Drag while editing', 'paint with the brush'],
       ['Escape while editing', 'put the picture back'],
@@ -50,18 +53,45 @@ const GROUPS: { title: string; items: [string, string][] }[] = [
 export function ShortcutsOverlay() {
   const show = useLibrary((s) => s.showShortcuts)
   const toggle = useLibrary((s) => s.toggleShortcuts)
+  const dialogRef = useRef<HTMLDivElement>(null)
+  const closeRef = useRef<HTMLButtonElement>(null)
+  const returnFocus = useRef<HTMLElement | null>(null)
 
-  // A modal dialog that documents the keyboard has to answer Escape, otherwise the
-  // only ways out are a backdrop click or the close button.
   useEffect(() => {
     if (!show) return
+    // A modal that documents the keyboard has to answer Escape, otherwise the
+    // only ways out are a backdrop click or the close button. Focus starts on
+    // Close, stays trapped inside while open, and returns to whatever opened it.
+    returnFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    closeRef.current?.focus()
     const onKey = (event: KeyboardEvent): void => {
-      if (event.key !== 'Escape') return
-      event.preventDefault()
-      toggle()
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        toggle()
+        return
+      }
+      if (event.key !== 'Tab') return
+      const root = dialogRef.current
+      if (!root) return
+      const items = [...root.querySelectorAll<HTMLElement>(
+        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+      )].filter((el) => !el.hasAttribute('disabled'))
+      if (items.length === 0) return
+      const first = items[0]!
+      const last = items[items.length - 1]!
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault()
+        first.focus()
+      }
     }
     window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      returnFocus.current?.focus()
+    }
   }, [show, toggle])
 
   if (!show) return null
@@ -75,12 +105,14 @@ export function ShortcutsOverlay() {
       className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--c-scrim)] p-6"
     >
       <div
+        ref={dialogRef}
         onClick={(event) => event.stopPropagation()}
         className="w-full max-w-[620px] rounded-[6px] border border-line bg-surface shadow-[var(--shadow-tint)]"
       >
         <header className="flex items-center justify-between border-b border-line px-4 py-3">
           <h2 className="text-[13px] font-semibold">Keyboard shortcuts</h2>
           <button
+            ref={closeRef}
             type="button"
             aria-label="Close"
             onClick={toggle}

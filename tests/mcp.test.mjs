@@ -12,7 +12,7 @@
 import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve, sep } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { deflateSync } from 'node:zlib'
 
@@ -27,12 +27,57 @@ const FIX = join(process.env.TEMP ?? '.', `openpics-edit-verify-${randomUUID().s
 const DATA = join(FIX, 'data')
 mkdirSync(DATA, { recursive: true })
 
+/**
+ * A throwaway Recycle Bin, redirected through `OPENPICS_BIN_DIR`.
+ *
+ * `bin_purge` and `bin_empty` are the two irreversible tools, and they are the
+ * only destructive paths with no test coverage - because the only directory
+ * listBin reads is the user's actual Recycle Bin, and no test suite has any
+ * business seeding that. `core/recyclebin.ts` gained the same override
+ * `core/datadir.ts` has, on the same reasoning.
+ *
+ * Without this the suite would delete the user's real deleted files, so the
+ * override is verified rather than assumed: `BIN` must land inside this run's
+ * own `FIX` directory, and the tests skip themselves if it does not.
+ */
+const BIN = join(FIX, 'bin')
+mkdirSync(BIN, { recursive: true })
+const binIsSandboxed = resolve(BIN).startsWith(resolve(FIX) + sep)
+
 process.env.OPENPICS_DATA_DIR = DATA
+process.env.OPENPICS_BIN_DIR = BIN
+
+/**
+ * Opens FIX as the library, the way a user opening a folder would.
+ *
+ * Needed because the server decides what a model may name from the root the app
+ * has open - see core/path-policy.ts - and refuses anything outside it. The
+ * fixture picture lives beside the data directory rather than inside it, so
+ * without this the very first edit call is refused as being outside the library.
+ *
+ * It also has to exist at all: `mcpEnabled` fails closed, so a missing settings
+ * file means no tools rather than all of them. Declaring the switch and the root
+ * here keeps the two decisions explicit and in one place, and means this file
+ * still exercises the real gate rather than a bypass.
+ */
+writeFileSync(join(DATA, 'settings.json'), JSON.stringify({ enableMcp: true, root: FIX, scanMode: 'folder' }, null, 2), 'utf8')
 
 const child = spawn(process.execPath, [SERVER], {
-  env: { ...process.env, OPENPICS_DATA_DIR: DATA },
+  env: { ...process.env, OPENPICS_DATA_DIR: DATA, OPENPICS_BIN_DIR: BIN },
   stdio: ['pipe', 'pipe', 'inherit']
 })
+
+/**
+ * What the client does when the server asks it a question.
+ *
+ * `bin_purge` and `bin_empty` put their confirmation to the *person* through MCP
+ * elicitation rather than trusting a model-supplied `confirm` flag, so exercising
+ * them needs a client that can answer. Mutable on purpose: each test sets the
+ * answer it is about, which keeps the harness from spawning one server per
+ * answer and makes "declined" and "accepted" the same code path.
+ */
+let elicitReply = { action: 'decline' }
+let elicitSeen = null
 
 let buf = Buffer.alloc(0)
 const pending = new Map()
@@ -50,6 +95,32 @@ child.stdout.on('data', (chunk) => {
       const { resolve } = pending.get(msg.id)
       pending.delete(msg.id)
       resolve(msg)
+      continue
+    }
+    // A server-to-client request: the server is asking this harness something.
+    // Only elicitation is answered; anything else is refused rather than
+    // ignored, so a new interactive feature cannot hang the suite silently.
+    if (msg.id !== undefined && msg.method) {
+      if (msg.method === 'elicitation/create') {
+        elicitSeen = msg.params
+        child.stdin.write(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: msg.id,
+            result: elicitReply.action === 'accept'
+              ? { action: 'accept', content: elicitReply.content ?? { confirmed: true } }
+              : { action: elicitReply.action }
+          }) + '\n'
+        )
+      } else {
+        child.stdin.write(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: msg.id,
+            error: { code: -32601, message: `harness does not implement ${msg.method}` }
+          }) + '\n'
+        )
+      }
     }
   }
 })
@@ -106,9 +177,15 @@ async function decodeWritten(path) {
   }
 }
 
-const await0 = await rpc('initialize', {
+// Awaited for its side effect: the handshake has to complete before the server
+// will serve a tools/list. The result is not inspected - the assertions that
+// matter are on the tools themselves, a few lines down.
+await rpc('initialize', {
   protocolVersion: '2024-11-05',
-  capabilities: {},
+  // `elicitation.form` is declared so the destructive bin tools can put their
+  // confirmation to the person instead of trusting a model-supplied flag. The
+  // harness answers via `elicitReply` above.
+  capabilities: { elicitation: { form: {} } },
   clientInfo: { name: 'verify', version: '1' }
 })
 const tools = await rpc('tools/list', {})
@@ -116,11 +193,14 @@ const byName = new Map((tools.result.tools ?? []).map((t) => [t.name, t]))
 const names = [...byName.keys()].sort()
 console.log(`tools registered: ${names.length}`)
 // Seven video tools joined the original 32: video_addons, video_probe, video_trim,
-// video_split, video_concat, video_frame and video_filter. The count is pinned
-// because a tool that silently stops being registered is the one failure mode an
-// agent cannot report on its own - it just stops finding the capability.
-const EXPECTED_TOOLS = 39
-check('tool count is 39', names.length === EXPECTED_TOOLS, `got ${names.length}: ${names.join(',')}`)
+// video_split, video_concat, video_frame and video_filter. Seven drawing tools
+// joined after that: creatives_list, creatives_draw, creatives_shape,
+// creatives_text, creatives_undo, creatives_delete and creatives_clear. The
+// count is pinned because a tool that silently stops being registered is the
+// one failure mode an agent cannot report on its own - it just stops finding
+// the capability.
+const EXPECTED_TOOLS = 46
+check('tool count is 46', names.length === EXPECTED_TOOLS, `got ${names.length}: ${names.join(',')}`)
 
 // A client uses these three hints to decide whether it needs to warn a person or
 // back something up before calling. A wrong hint is worse than a missing one, so
@@ -152,7 +232,22 @@ const annotationExpectations = {
   video_split: { readOnly: false, idempotent: false },
   video_concat: { readOnly: false, idempotent: false },
   video_frame: { readOnly: false, idempotent: false },
-  video_filter: { readOnly: false, idempotent: false }
+  video_filter: { readOnly: false, idempotent: false },
+  // The drawing tools are pinned the same way. Only the list is read-only and
+  // only clear is destructive; the rest append, remove or replace one stroke.
+  creatives_list: { readOnly: true, idempotent: true },
+  creatives_draw: { readOnly: false, idempotent: false },
+  creatives_shape: { readOnly: false, idempotent: false },
+  creatives_text: { readOnly: false, idempotent: false },
+  creatives_undo: { readOnly: false, idempotent: false },
+  creatives_delete: { readOnly: false, idempotent: false },
+  creatives_clear: { readOnly: false, destructive: true, idempotent: false },
+  // The two irreversible bin tools. Pinned here because the confirmation moved
+  // from a model-supplied `confirm: true` to elicitation, and this is where a
+  // regression would otherwise go unnoticed: `destructive` is the only signal
+  // left telling a client to warn a human.
+  bin_purge: { readOnly: false, destructive: true, idempotent: true },
+  bin_empty: { readOnly: false, destructive: true, idempotent: true }
 }
 for (const [name, want] of Object.entries(annotationExpectations)) {
   const a = byName.get(name)?.annotations ?? {}
@@ -252,8 +347,6 @@ check('global wand takes every pixel of one colour', r.value.stats.kept === 2000
 // the part of the background the seed is connected to, which for a corner seed on
 // a uniform background is all of it - so compare against a tolerance that does
 // separate them instead.
-r = await call('edit_select_wand', { edit, x: 2, y: 2, tolerance: 20, keep: 'region', contiguous: false })
-const globalStat = r.value.stats.kept
 // The two colours differ by 380 exactly (|220-20|+|30-40|+|30-200|), and the
 // tolerance is inclusive, so 379 must split them and 380 must not. This is the
 // line that decides whether a cutout keeps the subject.
@@ -413,8 +506,6 @@ await call('edit_select_rect', { edit, x: 50, y: 35, width: 5, height: 5 })
 // top with a second rect is not possible; instead start from all-kept and clear
 // everything except two rectangles.
 await call('edit_select_all', { edit, state: 'kept' })
-r = await call('edit_select_rect', { edit, x: 0, y: 0, width: 10, height: 10 })
-const bigArea = 100
 // Clear the picture, then paint both islands with hard-edged rects via erase.
 await call('edit_select_all', { edit, state: 'removed' })
 await call('edit_brush', { edit, points: [{ x: 4, y: 4 }, { x: 52, y: 37 }], radius: 1, hardness: 1, mode: 'restore' })
@@ -691,6 +782,171 @@ r = await call('edit_preview', { edit: tmpEdit, path: once })
 check('preview refuses to clobber', r.isError, r.raw.slice(0, 160))
 await call('edit_close', { edit: tmpEdit })
 
+/* ---------- irreversible bin tools ask a person ---------- */
+section('bin confirmation')
+// These two used to take a `confirm: true` argument and nothing else. An agent
+// that had decided to empty the bin would simply pass it - `z.literal(true)` is
+// not a gate, it is a formality. The confirmation is now put to the person over
+// MCP elicitation, so these tests assert on what the server *asked* as well as on
+// whether the deletion happened.
+
+r = await call('bin_purge', { id: 'not-a-real-id' })
+check('purge of an unknown id is refused', r.isError === true, r.raw.slice(0, 160))
+check('and it says to list the bin', /bin_list/.test(r.raw), r.raw.slice(0, 160))
+check('an unknown id never reaches the user as a question', elicitSeen === null, JSON.stringify(elicitSeen))
+
+// A real bin entry, seeded the way the app seeds one: an $I record plus its $R
+// payload, which is what listBin reads to produce an id.
+{
+  /**
+   * Writes one `$I` record plus its `$R` payload, which is what listBin needs to
+   * produce an entry at all.
+   *
+   * The layout is version 2: an 8-byte version, the original size, a FILETIME, a
+   * character count, then the path in UTF-16LE. Getting an offset wrong produces a
+   * record that parses to nothing, which looks exactly like an empty bin - so the
+   * offsets here match `parseInfoRecord` and the assertion below proves the
+   * fixture is readable before any behaviour is claimed about it.
+   */
+  const seed = (name, bytes) => {
+    const id = `TEST${name}`
+    const originalPath = join(FIX, 'confirm-delete-me.txt')
+    const text = originalPath
+    const body = Buffer.from(text, 'utf16le')
+    const rec = Buffer.alloc(28 + body.length)
+    rec.writeBigUInt64LE(2n, 0)
+    rec.writeBigUInt64LE(BigInt(bytes), 8)
+    // FILETIME: 100ns ticks since 1601-01-01.
+    rec.writeBigUInt64LE((BigInt(Date.now()) + 11644473600000n) * 10000n, 16)
+    // The count includes the NUL terminator, which is why parseInfoRecord reads
+    // `chars - 1`. Writing the bare length here silently truncates the last
+    // character of the path, which is how a fixture ends up naming "file.tx".
+    rec.writeUInt32LE(text.length + 1, 24)
+    body.copy(rec, 28)
+    writeFileSync(join(BIN, `$I${id}`), rec)
+    writeFileSync(join(BIN, `$R${id}`), Buffer.alloc(bytes, 7))
+  }
+  // This suite seeds `$I`/`$R` records, so it must be pointed at a throwaway
+  // directory. If the sandbox did not hold, skip rather than risk a real user's
+  // Recycle Bin - the cost of a skipped check is far below the cost of that.
+  if (!binIsSandboxed) {
+    section('bin confirmation (SKIPPED: not sandboxed)')
+    console.log(`  skip bin confirmation: BIN=${BIN} is not inside FIX=${FIX}`)
+  } else {
+    check('the bin is redirected into this run own directory', binIsSandboxed === true)
+    seed('ONE', 1500)
+    seed('TWO', 2048)
+
+    const listed = await call('bin_list', {})
+    check('the seeded items are visible', !listed.isError && listed.value.count >= 2, listed.raw.slice(0, 200))
+    const ids = (listed.value.entries ?? []).filter((e) => e.id.startsWith('TEST')).map((e) => e.id)
+
+    // Declined by the person: nothing may be deleted, and the tool has to say so.
+    elicitReply = { action: 'decline' }
+    elicitSeen = null
+    r = await call('bin_purge', { id: ids[0] })
+    check('a declined purge deletes nothing', r.isError === true, r.raw.slice(0, 160))
+    check('the refusal says nothing was deleted', /nothing was deleted/i.test(r.raw), r.raw.slice(0, 160))
+    check('the person was actually asked', elicitSeen !== null, 'no elicitation request arrived')
+    check(
+      'the question names the file',
+      /confirm-delete-me/.test(elicitSeen?.message ?? ''),
+      JSON.stringify(elicitSeen?.message)
+    )
+    check(
+      'and gives a size a person can judge',
+      /\d+(\.\d+)? (B|KB|MB)/.test(elicitSeen?.message ?? ''),
+      JSON.stringify(elicitSeen?.message)
+    )
+
+    // Cancelled is a different answer from declined and is treated the same way.
+    elicitReply = { action: 'cancel' }
+    r = await call('bin_purge', { id: ids[0] })
+    check('a cancelled purge deletes nothing', r.isError === true, r.raw.slice(0, 160))
+
+    // Accepted by the person: this is the one path that may delete.
+    elicitReply = { action: 'accept', content: { confirmed: true } }
+    r = await call('bin_purge', { id: ids[0] })
+    check('an accepted purge goes through', !r.isError, r.raw.slice(0, 160))
+    check('and it reports the name, not just the id', /confirm-delete-me/.test(r.raw), r.raw.slice(0, 160))
+    const afterOne = await call('bin_list', {})
+    check(
+      'only that item went',
+      !(afterOne.value.entries ?? []).some((e) => e.id === ids[0]),
+      'the purged id is still listed'
+    )
+
+    // "accept" without ticking the box is not consent.
+    elicitReply = { action: 'accept', content: { confirmed: false } }
+    r = await call('bin_purge', { id: ids[1] })
+    check('accept without the box ticked is not consent', r.isError === true, r.raw.slice(0, 160))
+    const afterUnticked = await call('bin_list', {})
+    check('and the item survives', (afterUnticked.value.entries ?? []).some((e) => e.id === ids[1]))
+
+    // The escape hatch, for a client with no way to ask.
+    r = await call('bin_purge', { id: ids[1], confirm: true })
+    check('confirm true skips the question for a client that cannot ask', !r.isError, r.raw.slice(0, 160))
+
+    // bin_empty, same rules and one more: an empty bin must not ask at all.
+    // `elicitSeen` is cleared first so a leftover from the purge above cannot
+    // satisfy the "no question asked" assertion.
+    elicitSeen = null
+    r = await call('bin_empty', {})
+    check('emptying an already-empty bin is a no-op, not a prompt', !r.isError, r.raw.slice(0, 160))
+    check('and it says so', /already empty/i.test(r.raw), r.raw.slice(0, 160))
+    check('with no question asked', elicitSeen === null, JSON.stringify(elicitSeen))
+
+    seed('THREE', 4096)
+    elicitSeen = null
+    elicitReply = { action: 'decline' }
+    r = await call('bin_empty', {})
+    check('a declined empty deletes nothing', r.isError === true, r.raw.slice(0, 160))
+    check('the empty question says how many items', /all \d+ item/.test(elicitSeen?.message ?? ''), JSON.stringify(elicitSeen?.message))
+    check('and totals the size', /\d+(\.\d+)? (B|KB|MB)/.test(elicitSeen?.message ?? ''), JSON.stringify(elicitSeen?.message))
+    const stillThere = await call('bin_list', {})
+    check('the items are still in the bin', (stillThere.value.entries ?? []).some((e) => e.id.startsWith('TEST')))
+
+    elicitReply = { action: 'accept', content: { confirmed: true } }
+    r = await call('bin_empty', {})
+    check('an accepted empty goes through', !r.isError, r.raw.slice(0, 160))
+    const emptied = await call('bin_list', {})
+    check('and the bin is empty', (emptied.value.entries ?? []).filter((e) => e.id.startsWith('TEST')).length === 0)
+
+    elicitReply = { action: 'decline' }
+  }
+}
+
+/* ---------- creatives drawing tools ---------- */
+section('creatives drawing')
+r = await call('creatives_list', {})
+check('an untouched drawing lists nothing', !r.isError && r.value.count === 0 && r.value.strokes.length === 0, r.raw.slice(0, 160))
+r = await call('creatives_draw', { points: [{ x: 10, y: 10 }, { x: 100, y: 50 }], tool: 'brush', color: '#ff0000' })
+check('a stroke draws', !r.isError, r.raw.slice(0, 160))
+r = await call('creatives_list', {})
+check('the stroke is listed with an agent id', !r.isError && r.value.count === 1 && r.value.strokes[0].id < 0, r.raw.slice(0, 200))
+check('and it kept its colour', r.value.strokes[0].color === '#ff0000')
+r = await call('creatives_shape', { kind: 'rect', x1: 0, y1: 0, x2: 50, y2: 40, fill: '#00ff00' })
+check('a shape draws', !r.isError, r.raw.slice(0, 160))
+r = await call('creatives_text', { x: 400, y: 300, text: 'hello' })
+check('text places', !r.isError, r.raw.slice(0, 160))
+r = await call('creatives_list', {})
+check('three strokes now', r.value.count === 3, r.raw.slice(0, 200))
+const textId = r.value.strokes.find((s) => s.kind === 'text').id
+r = await call('creatives_delete', { id: textId })
+check('delete removes by id', !r.isError, r.raw.slice(0, 160))
+r = await call('creatives_list', {})
+check('two strokes left', r.value.count === 2, r.raw.slice(0, 200))
+r = await call('creatives_undo', {})
+check('undo takes the last stroke', !r.isError, r.raw.slice(0, 160))
+r = await call('creatives_list', {})
+check('one stroke left', r.value.count === 1, r.raw.slice(0, 200))
+r = await call('creatives_draw', { points: [{ x: 1, y: 1 }], color: 'red' })
+check('a non-hex colour is refused by the schema', r.isError === true, r.raw.slice(0, 160))
+r = await call('creatives_clear', {})
+check('clear empties', !r.isError, r.raw.slice(0, 160))
+r = await call('creatives_list', {})
+check('and the list agrees', r.value.count === 0, r.raw.slice(0, 160))
+
 /* ---------- the MCP switch ---------- */
 section('mcp switch')
 // The switch is re-read per tool call rather than cached at startup, precisely
@@ -714,16 +970,69 @@ r = await call('bin_list', {})
 check('a destructive tool refuses while the switch is off', r.isError === true, r.raw.slice(0, 160))
 r = await call('edit_cutout_auto', { path: SRC, tolerance: 20 })
 check('an edit tool refuses while the switch is off', r.isError === true, r.raw.slice(0, 160))
+r = await call('creatives_draw', { points: [{ x: 1, y: 1 }] })
+check('a drawing tool refuses while the switch is off', r.isError === true, r.raw.slice(0, 160))
 
 writeFileSync(settingsFile, JSON.stringify({ ...wasAllowed, enableMcp: true }, null, 2), 'utf8')
 r = await call('photos_find', { root: FIX })
 check('tools work again once the switch is back on', !r.isError, r.raw.slice(0, 160))
 
-// An absent key must behave as "on": that is how the app shipped, and treating a
-// missing file as "off" would silently disable every agent on upgrade.
+// An absent settings file now means **off**, not on.
+//
+// This used to be the other way round, on the argument that treating a missing
+// file as "off" would silently disable every agent on upgrade. That reasoning
+// assumes the only way to be missing is an old version, and it ignores the other
+// one: settings.json is rewritten in place, so a process killed mid-write leaves
+// a truncated file that reads as absent. Under fail-open that turns a crash into
+// an open door - and `toolsEnabled` in electron/ai/core.ts already failed closed
+// for exactly that reason, so the two implementations of the same switch
+// disagreed. The upgrade case is handled instead by treating "a readable file
+// with no enableMcp key" as on, which is the only shape an old install has.
 rmSync(settingsFile, { force: true })
 r = await call('photos_find', { root: FIX })
-check('an absent setting file leaves the tools allowed', !r.isError, r.raw.slice(0, 160))
+check('an absent settings file leaves the tools refused', r.isError, r.raw.slice(0, 160))
+// Which layer refuses is not pinned. With no readable settings there is neither a
+// switch saying "off" nor a library root to be inside, so the path check fires
+// during argument validation - before `guard` ever runs the switch. Both are the
+// right outcome; what matters is that it is refused and that the refusal says
+// why, so the assertion covers either wording rather than forcing an order.
+check(
+  'the refusal explains itself',
+  /turned off in Settings/i.test(r.raw) || /outside the library/i.test(r.raw),
+  r.raw.slice(0, 200)
+)
+
+// The upgrade case that the old behaviour was defending: a file that exists and
+// parses, but predates the switch, must still work.
+writeFileSync(settingsFile, JSON.stringify({ root: FIX, scanMode: 'folder' }), 'utf8')
+r = await call('photos_find', { root: FIX })
+check('a settings file with no switch key still allows the tools', !r.isError, r.raw.slice(0, 160))
+
+// And the containment rule, which is the reason any of this matters: a path
+// outside the open library is refused whatever the switch says.
+writeFileSync(settingsFile, JSON.stringify({ enableMcp: true, root: FIX, scanMode: 'folder' }, null, 2), 'utf8')
+const outside = join(process.env.TEMP ?? '.', `openpics-outside-${randomUUID().slice(0, 8)}`)
+mkdirSync(outside, { recursive: true })
+r = await call('edit_cutout_auto', { path: join(outside, 'nope.png') })
+check('a path outside the open library is refused', r.isError === true, r.raw.slice(0, 200))
+check('the refusal names the permitted roots', /outside the library/i.test(r.raw), r.raw.slice(0, 200))
+
+// Traversal must not be a way around the boundary: a root of FIX must not admit
+// its own parent just because the string starts the same way.
+r = await call('edit_cutout_auto', { path: join(FIX, '..', '..', 'Windows', 'System32', 'config', 'SAM') })
+check('traversal out of the library is refused', r.isError === true, r.raw.slice(0, 200))
+
+// Nor a sibling whose name merely begins with the root's, which is what a plain
+// startsWith would admit.
+r = await call('edit_cutout_auto', { path: `${FIX}-private` })
+check('a sibling directory sharing the root prefix is refused', r.isError === true, r.raw.slice(0, 200))
+
+// A network path is refused outright rather than compared, since "is this inside
+// the library" is not a question that can be answered about another machine.
+r = await call('edit_cutout_auto', { path: '\\\\attacker\\share\\payload.png' })
+check('a UNC path is refused', r.isError === true, r.raw.slice(0, 200))
+
+try { rmSync(outside, { recursive: true, force: true }) } catch {}
 
 console.log(`\n==== ${pass} passed, ${fail} failed ====`)
 if (failures.length) { console.log('\nFailures:'); for (const f of failures) console.log(' - ' + f) }

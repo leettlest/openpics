@@ -10,7 +10,6 @@ import {
   type FrameRequest,
   type SplitRequest,
   type TrimRequest,
-  type VideoCodec,
   type VideoInfo,
   type VideoOutput
 } from '../../shared/video'

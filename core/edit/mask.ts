@@ -110,7 +110,6 @@ export function featherMask(mask: Mask, radius: number): Mask {
   if (r === 0) return cloneMask(mask)
 
   const { width, height, values } = mask
-  const width2 = width * 2
   const tmp = new Float64Array(width * height)
   const out = new Uint8Array(width * height)
   const window = r * 2 + 1

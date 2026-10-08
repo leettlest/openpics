@@ -47,6 +47,18 @@ export interface BinEntry {
  * current user's is the one that will hold their own files.
  */
 export async function binDir(): Promise<string> {
+  // `OPENPICS_BIN_DIR` redirects the bin, on the same terms as
+  // `OPENPICS_DATA_DIR` in `core/datadir`: an agent that needs to prove a
+  // permanent deletion needs somewhere disposable to do it in.
+  //
+  // Without this, the two `bin_*` tools that cannot be undone are the only
+  // destructive paths in the codebase with no test coverage at all - the obvious
+  // way to write a test is to seed entries and assert on them, and the only
+  // directory listBin reads is the user's actual Recycle Bin. That is not a
+  // trade worth making for coverage, so the bin is redirectable and the tests
+  // never touch the real one.
+  const override = process.env.OPENPICS_BIN_DIR
+  if (override) return override
   const found = await psJson<{ path: string }>(`
 $root = Join-Path $env:SystemDrive '$Recycle.Bin'
 $sid = ([System.Security.Principal.WindowsIdentity]::GetCurrent()).User.Value

@@ -202,6 +202,14 @@ export function handleCutoutAuto(path: string, options: CutoutOptions = {}): Cut
   if (!Number.isFinite(tolerance) || tolerance < 0 || tolerance > 765) {
     throw new EditError(`tolerance must be between 0 and 765, got ${tolerance}`)
   }
+  // Checkpointed here for the same reason the brush is: `cutoutFromBorder`
+  // rewrites the mask and this session may already hold work. Without it the
+  // history stays empty, Undo reports `canUndo: false` right after the app's
+  // headline action, and the first stroke afterwards becomes the only undo
+  // step - so Undo reversed the correction while silently keeping the cutout,
+  // and `apply` would then write that out as if it were wanted. The
+  // agent-facing cutout in mcp/server.ts already checkpoints.
+  checkpoint(handle.session, 'remove the background')
   const { wand, stats } = cutoutFromBorder(handle.session, tolerance)
   const info = describe(handle)
   const pixels = stats.pixels

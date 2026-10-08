@@ -60,6 +60,11 @@ export function FilterBar() {
   const inputClass =
     'h-7 rounded-[6px] border border-line bg-raised px-2 text-[12px] text-ink placeholder:text-ink-3 focus:border-line-strong focus:outline-none'
 
+  // An inverted range matches nothing by construction, which used to read as a
+  // mystery empty library. Say so where the range is typed instead.
+  const dateInverted = dateStart !== null && dateEnd !== null && dateStart > dateEnd
+  const sizeInverted = sizeMin !== null && sizeMax !== null && sizeMin > sizeMax
+
   return (
     <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-line px-3 py-1.5">
       <FunnelSimple size={14} className="text-ink-3" aria-hidden />
@@ -71,6 +76,7 @@ export function FilterBar() {
           type="date"
           className={inputClass}
           value={toDateInput(dateStart)}
+          aria-invalid={dateInverted}
           onChange={(event) => setDateRange(dayStart(event.target.value), dateEnd)}
         />
       </label>
@@ -80,6 +86,7 @@ export function FilterBar() {
           type="date"
           className={inputClass}
           value={toDateInput(dateEnd)}
+          aria-invalid={dateInverted}
           onChange={(event) => setDateRange(dateStart, dayEnd(event.target.value))}
         />
       </label>
@@ -91,6 +98,7 @@ export function FilterBar() {
           min={0}
           className={`${inputClass} w-20`}
           value={sizeMin === null ? '' : Math.round(sizeMin / MB)}
+          aria-invalid={sizeInverted}
           onChange={(event) =>
             setSizeRange(event.target.value === '' ? null : Number(event.target.value) * MB, sizeMax)
           }
@@ -103,11 +111,21 @@ export function FilterBar() {
           min={0}
           className={`${inputClass} w-20`}
           value={sizeMax === null ? '' : Math.round(sizeMax / MB)}
+          aria-invalid={sizeInverted}
           onChange={(event) =>
             setSizeRange(sizeMin, event.target.value === '' ? null : Number(event.target.value) * MB)
           }
         />
       </label>
+      {dateInverted || sizeInverted ? (
+        <span role="alert" className="text-[11px] text-ink-2">
+          {dateInverted && sizeInverted
+            ? 'Both ranges are backwards, so nothing can match.'
+            : dateInverted
+              ? 'The start date is after the end date, so nothing can match.'
+              : 'The minimum size is above the maximum, so nothing can match.'}
+        </span>
+      ) : null}
 
       <input
         type="text"

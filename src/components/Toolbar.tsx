@@ -1,5 +1,6 @@
 import {
   ArrowsOut,
+  DotsThree,
   FolderOpen,
   GearSix,
   Info,
@@ -12,10 +13,11 @@ import {
   TerminalWindow,
   X
 } from '@phosphor-icons/react'
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { ScanMode, SortKey } from '@shared/protocol'
 import { useLibrary } from '@/store/library'
 import { formatCount } from '@/lib/format'
+import { useMediaQuery } from '@/lib/useMediaQuery'
 import { IconButton, Segmented, Toggle } from './ui'
 import { SmartCollectionsMenu } from './SmartCollectionsMenu'
 
@@ -49,16 +51,14 @@ export function Toolbar() {
   const progress = useLibrary((s) => s.progress)
   const showSettings = useLibrary((s) => s.showSettings)
   const terminalOpen = useLibrary((s) => s.terminalOpen)
-  const {
-    patch,
-    setSort,
-    setQuery,
-    pickFolder,
-    toggleInfo,
-    toggleShortcuts,
-    toggleSlideshow,
-    toggleTerminal
-  } = useLibrary()
+  const patch = useLibrary((s) => s.patch)
+  const setSort = useLibrary((s) => s.setSort)
+  const setQuery = useLibrary((s) => s.setQuery)
+  const pickFolder = useLibrary((s) => s.pickFolder)
+  const toggleInfo = useLibrary((s) => s.toggleInfo)
+  const toggleShortcuts = useLibrary((s) => s.toggleShortcuts)
+  const toggleSlideshow = useLibrary((s) => s.toggleSlideshow)
+  const toggleTerminal = useLibrary((s) => s.toggleTerminal)
   const setShowSettings = useLibrary((s) => s.setShowSettings)
   const cancelScan = useLibrary((s) => s.cancelScan)
 
@@ -76,6 +76,11 @@ export function Toolbar() {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [])
+
+  // Below 900px the secondary controls move into the More menu instead of
+  // wrapping the bar to three rows. Rendered, not class-toggled: pairing a base
+  // display class with a breakpoint one leaves the winner to stylesheet order.
+  const narrow = useMediaQuery('(max-width: 900px)')
 
   const hasPhotos = photos.length > 0
   const dir = settings.sortDir === 'asc' ? 'ascending' : 'descending'
@@ -101,7 +106,7 @@ export function Toolbar() {
         title="Choose a different folder"
       >
         <FolderOpen size={15} weight="regular" />
-        <span className="truncate">Change folder</span>
+        <span className="truncate max-[1100px]:hidden">Change folder</span>
       </button>
 
       <Segmented
@@ -130,7 +135,7 @@ export function Toolbar() {
           placeholder="Filter by name"
           aria-label="Filter pictures by name"
           spellCheck={false}
-          className="h-8 w-[190px] rounded-[6px] border border-line bg-raised pl-8 pr-7 text-[13px] text-ink placeholder:text-ink-3 transition-colors duration-150 focus:border-line-strong focus:outline-none"
+          className="h-8 w-[190px] rounded-[6px] border border-line bg-raised pl-8 pr-7 text-[13px] text-ink placeholder:text-ink-3 transition-colors duration-150 focus:border-line-strong focus:outline-none max-[1100px]:w-[130px]"
         />
         {query !== '' ? (
           <button
@@ -145,31 +150,43 @@ export function Toolbar() {
         ) : null}
       </div>
 
-      <div className="flex items-center gap-1.5">
-        <Rows size={14} weight="regular" className="text-ink-3" />
-        <Segmented
-          label="Sort pictures"
-          value={settings.sortKey}
-          options={SORT_OPTIONS}
-          onChange={setSort}
-        />
-        <span className="num text-[11px] text-ink-3">{dir}</span>
-      </div>
-
-      <Segmented
-        label="Thumbnail size"
-        value={String(settings.rowHeight)}
-        options={DENSITY_OPTIONS}
-        onChange={(value) => void patch({ rowHeight: Number(value) })}
-      />
-
-      <Toggle
-        label="Subfolders"
-        checked={settings.recursive}
-        onChange={(value) => void patch({ recursive: value })}
-      />
-
       <SmartCollectionsMenu />
+
+      {/*
+        Secondary controls live here on wide windows and move into the More
+        menu below 900px. Both copies read the same store, and only one is ever
+        rendered, so there is a single source of truth and no focusable
+        duplicates. Everything demoted has another home (Settings or a key);
+        the folder picker, source, search, collections and scan progress do
+        not, so they never demote.
+      */}
+      {!narrow ? (
+        <>
+          <div className="flex items-center gap-1.5">
+            <Rows size={14} weight="regular" className="text-ink-3" />
+            <Segmented
+              label="Sort pictures"
+              value={settings.sortKey}
+              options={SORT_OPTIONS}
+              onChange={setSort}
+            />
+            <span className="num text-[11px] text-ink-3 max-[1100px]:hidden">{dir}</span>
+          </div>
+
+          <Segmented
+            label="Thumbnail size"
+            value={String(settings.rowHeight)}
+            options={DENSITY_OPTIONS}
+            onChange={(value) => void patch({ rowHeight: Number(value) })}
+          />
+
+          <Toggle
+            label="Subfolders"
+            checked={settings.recursive}
+            onChange={(value) => void patch({ recursive: value })}
+          />
+        </>
+      ) : null}
 
       <div className="ml-auto flex items-center gap-1">
         <IconButton
@@ -179,13 +196,15 @@ export function Toolbar() {
         >
           <MonitorPlay size={16} weight="regular" />
         </IconButton>
-        <IconButton
-          label="Toggle always on top"
-          active={settings.alwaysOnTop}
-          onClick={() => void patch({ alwaysOnTop: !settings.alwaysOnTop })}
-        >
-          <PushPin size={16} weight={settings.alwaysOnTop ? 'fill' : 'regular'} />
-        </IconButton>
+        {narrow ? null : (
+          <IconButton
+            label="Toggle always on top"
+            active={settings.alwaysOnTop}
+            onClick={() => void patch({ alwaysOnTop: !settings.alwaysOnTop })}
+          >
+            <PushPin size={16} weight={settings.alwaysOnTop ? 'fill' : 'regular'} />
+          </IconButton>
+        )}
         <IconButton
           label="Details of selected picture (I)"
           disabled={!hasPhotos}
@@ -193,16 +212,18 @@ export function Toolbar() {
         >
           <Info size={16} weight="regular" />
         </IconButton>
-        <IconButton
-          label={settings.theme === 'dark' ? 'Switch to light' : 'Switch to dark'}
-          onClick={() => void patch({ theme: settings.theme === 'dark' ? 'light' : 'dark' })}
-        >
-          {settings.theme === 'dark' ? (
-            <Sun size={16} weight="regular" />
-          ) : (
-            <ArrowsOut size={16} weight="regular" />
-          )}
-        </IconButton>
+        {narrow ? null : (
+          <IconButton
+            label={settings.theme === 'dark' ? 'Switch to light' : 'Switch to dark'}
+            onClick={() => void patch({ theme: settings.theme === 'dark' ? 'light' : 'dark' })}
+          >
+            {settings.theme === 'dark' ? (
+              <Sun size={16} weight="regular" />
+            ) : (
+              <ArrowsOut size={16} weight="regular" />
+            )}
+          </IconButton>
+        )}
         <IconButton label="Terminal (Ctrl+`)" active={terminalOpen} onClick={() => toggleTerminal()}>
           <TerminalWindow size={16} weight="regular" />
         </IconButton>
@@ -216,6 +237,7 @@ export function Toolbar() {
         <IconButton label="Keyboard shortcuts (?)" onClick={toggleShortcuts}>
           <Question size={16} weight="regular" />
         </IconButton>
+        {narrow ? <MoreMenu /> : null}
       </div>
 
       {scanning ? (
@@ -246,5 +268,110 @@ export function Toolbar() {
         </div>
       ) : null}
     </div>
+  )
+}
+
+/**
+ * The narrow-window home for demoted toolbar controls.
+ *
+ * Only rendered below 900px, holding labeled rows of the same store-backed
+ * controls the wide bar shows. Closes on Escape, on outside press, and on
+ * selection; focus returns to the button that opened it.
+ */
+function MoreMenu() {
+  const [open, setOpen] = useState(false)
+  const buttonRef = useRef<HTMLSpanElement>(null)
+  const panelRef = useRef<HTMLDivElement>(null)
+  const settings = useLibrary((s) => s.settings)
+  const setSort = useLibrary((s) => s.setSort)
+  const patch = useLibrary((s) => s.patch)
+
+  useEffect(() => {
+    if (!open) return
+    const onDown = (event: PointerEvent): void => {
+      if (panelRef.current?.contains(event.target as Node)) return
+      if (buttonRef.current?.contains(event.target as Node)) return
+      setOpen(false)
+    }
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return
+      // No focus juggling needed: the button that opened the panel stays
+      // mounted, so focus is already somewhere sensible when this closes.
+      event.preventDefault()
+      setOpen(false)
+    }
+    window.addEventListener('pointerdown', onDown, true)
+    window.addEventListener('keydown', onKey, true)
+    return () => {
+      window.removeEventListener('pointerdown', onDown, true)
+      window.removeEventListener('keydown', onKey, true)
+    }
+  }, [open])
+
+  return (
+    <span className="relative">
+      <IconButton
+        label="More toolbar controls"
+        active={open}
+        onClick={() => setOpen(!open)}
+      >
+        <DotsThree size={16} weight="bold" />
+      </IconButton>
+      {open ? (
+        <div
+          ref={panelRef}
+          role="menu"
+          aria-label="More toolbar controls"
+          className="absolute right-2 top-11 z-40 flex w-[240px] flex-col gap-3 rounded-[8px] border border-line bg-surface p-3 shadow-[var(--shadow-tint)]"
+        >
+          <div className="flex flex-col gap-1">
+            <span className="text-[11px] font-semibold uppercase tracking-wide text-ink-3">Sort pictures</span>
+            <Segmented
+              label="Sort pictures"
+              value={settings.sortKey}
+              options={SORT_OPTIONS}
+              onChange={setSort}
+            />
+          </div>
+          <div className="flex flex-col gap-1">
+            <span className="text-[11px] font-semibold uppercase tracking-wide text-ink-3">Thumbnail size</span>
+            <Segmented
+              label="Thumbnail size"
+              value={String(settings.rowHeight)}
+              options={DENSITY_OPTIONS}
+              onChange={(value) => void patch({ rowHeight: Number(value) })}
+            />
+          </div>
+          <Toggle
+            label="Subfolders"
+            checked={settings.recursive}
+            onChange={(value) => void patch({ recursive: value })}
+          />
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[12px] text-ink-2">Always on top</span>
+            <IconButton
+              label="Toggle always on top"
+              active={settings.alwaysOnTop}
+              onClick={() => void patch({ alwaysOnTop: !settings.alwaysOnTop })}
+            >
+              <PushPin size={16} weight={settings.alwaysOnTop ? 'fill' : 'regular'} />
+            </IconButton>
+          </div>
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[12px] text-ink-2">Appearance</span>
+            <IconButton
+              label={settings.theme === 'dark' ? 'Switch to light' : 'Switch to dark'}
+              onClick={() => void patch({ theme: settings.theme === 'dark' ? 'light' : 'dark' })}
+            >
+              {settings.theme === 'dark' ? (
+                <Sun size={16} weight="regular" />
+              ) : (
+                <ArrowsOut size={16} weight="regular" />
+              )}
+            </IconButton>
+          </div>
+        </div>
+      ) : null}
+    </span>
   )
 }

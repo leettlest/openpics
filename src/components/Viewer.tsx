@@ -8,10 +8,20 @@ import { picturePointAt, type StrokePoint } from '@/lib/geometry'
 import { useEditor } from '@/lib/useEditor'
 import { EditPanel } from './EditPanel'
 import { InfoPanel } from './InfoPanel'
+import { VideoControls } from './VideoControls'
 import { IconButton, Button } from './ui'
 
 const FADE_OUT_MS = 130
 const MAX_FIT_UPSCALE = 2
+
+/**
+ * Keys where holding the key down is the point, so auto-repeat is allowed.
+ *
+ * These pan a zoomed picture, which is a continuous gesture. Every other binding
+ * either changes mode or fires a one-shot, and repeating those is never what the
+ * user meant.
+ */
+const ARROW_KEYS = new Set(['ArrowRight', 'ArrowLeft', 'ArrowUp', 'ArrowDown'])
 
 interface Size {
   w: number
@@ -25,7 +35,14 @@ export function Viewer() {
   const showInfo = useLibrary((s) => s.showInfo)
   const editRequest = useLibrary((s) => s.editRequest)
   const interval = useLibrary((s) => s.settings.slideIntervalMs)
-  const { close, step, setSlideshow, toggleInfo, learnClip, clearEditRequest } = useLibrary()
+  // Actions only, so an unrelated store write cannot re-render the viewer and
+  // restart the transitions it owns. See the note in App.tsx.
+  const close = useLibrary((s) => s.close)
+  const step = useLibrary((s) => s.step)
+  const setSlideshow = useLibrary((s) => s.setSlideshow)
+  const toggleInfo = useLibrary((s) => s.toggleInfo)
+  const learnClip = useLibrary((s) => s.learnClip)
+  const clearEditRequest = useLibrary((s) => s.clearEditRequest)
 
   const stageRef = useRef<HTMLDivElement>(null)
   const imgRef = useRef<HTMLImageElement>(null)
@@ -214,7 +231,24 @@ export function Viewer() {
     const onKey = (event: KeyboardEvent): void => {
       if (event.defaultPrevented) return
       const target = event.target as HTMLElement | null
-      if (target?.tagName === 'INPUT') return
+      // Same rule as the library handler: inside an editable control, keys edit.
+      if (
+        target?.tagName === 'INPUT' ||
+        target?.tagName === 'TEXTAREA' ||
+        target?.tagName === 'SELECT' ||
+        target?.isContentEditable
+      ) {
+        return
+      }
+      // Auto-repeat is dropped entirely, so one held key is one action.
+      //
+      // Arrow keys and pan nudges are the deliberate exceptions and they handle
+      // their own repeat - `repeat` is deliberately allowed through for them
+      // below, because panning across a zoomed picture is exactly what holding a
+      // key should do. Every other binding here is a mode change or a one-shot:
+      // letting 'e' repeat would open an edit session per repeat tick, and none of
+      // them are undone until the awaited `bridge` call comes back.
+      if (event.repeat && !ARROW_KEYS.has(event.key)) return
       const zoomed = zoom > 1.02
       const panStep = 48
       const nudge = (dx: number, dy: number): void => {
@@ -439,6 +473,7 @@ export function Viewer() {
 
         <div
           ref={stageRef}
+          data-viewer-stage
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
           onPointerUp={endDrag}
@@ -471,7 +506,6 @@ export function Viewer() {
               ref={videoRef}
               key={photo.path}
               src={fullUrl(photo.path)}
-              controls
               preload="metadata"
               playsInline
               // Clips are muted by default. Autoplaying a clip with sound would
@@ -554,6 +588,8 @@ export function Viewer() {
               ].join(' ')}
             />
           )}
+
+          {!failure && isClip ? <VideoControls videoRef={videoRef} path={photo.path} /> : null}
 
           {painting && cursor !== null ? (
             <div

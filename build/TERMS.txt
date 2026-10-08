@@ -1,0 +1,35 @@
+OpenPics — Terms of Use
+by lestramk (https://bylestramk.org)
+
+Thank you for installing OpenPics. By installing and using this software you
+agree to the following terms.
+
+1. WHAT IT IS
+   OpenPics is a picture browser for Windows with local editing, a terminal,
+   a built-in AI assistant, and a command line. Everything runs on your own
+   computer.
+
+2. YOUR PRIVACY
+   OpenPics has no account, no upload, no telemetry, and no network code.
+   Your pictures are read from your disk and stay on your machine. The only
+   exception is what you choose to do yourself: links you click open in your
+   browser, and shells you open in the built-in terminal run with your normal
+   user rights.
+
+3. THE LICENCE
+   OpenPics is free and open source under the Apache License 2.0. You may
+   use, copy, modify, and share it, including commercially, under the terms
+   of that licence. The full licence text    ships with the installer as LICENSE,
+   and the FFmpeg build shipped alongside the app is licensed separately
+   under the LGPL - see NOTICE for the full terms.
+
+4. NO WARRANTY
+   The software is provided "as is", without warranty of any kind. Deleting
+   moves files to the Windows Recycle Bin rather than unlinking them, so a
+   mistake is recoverable the usual way, from Explorer - but you remain
+   responsible for your files.
+
+5. CREDIT
+   Commercial use is permitted. Any distribution must keep the NOTICE file
+   and credit OpenPics by Hen (Lee Muriithi Kingori), including in an About
+   or Credits screen.

@@ -1,5 +1,6 @@
 @import '@fontsource-variable/geist';
 @import '@fontsource-variable/geist-mono';
+@import '@fontsource-variable/syne';
 @import 'tailwindcss';
 
 /*
@@ -20,6 +21,7 @@
 
 @theme {
   --titlebar-h: 44px;
+  --font-byline: 'Syne Variable', 'Syne', sans-serif;
 }
 
 :root,

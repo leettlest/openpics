@@ -37,6 +37,9 @@ npm-debug.log*
 .cache/
 .vite/
 
+# Local GUI probe output (screenshots + report); the harness, not its runs.
+probe/
+
 # Editor and OS noise
 .DS_Store
 Thumbs.db

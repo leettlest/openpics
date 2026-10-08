@@ -1,4 +1,4 @@
-import { existsSync, writeFileSync as fsWriteFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync as fsWriteFileSync } from 'node:fs'
 import { dirname, join, parse } from 'node:path'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
@@ -24,10 +24,9 @@ import {
   thresholdMask
 } from '../core/edit/maskops'
 import { DEFAULT_PREVIEW_EDGE, previewRaster } from '../core/edit/preview'
-import { maskBoundsToRect, selectEllipse, selectPolygon, selectRect } from '../core/edit/select'
+import { selectEllipse, selectPolygon, selectRect } from '../core/edit/select'
 import {
   analyseRaster,
-  applySelection,
   checkpoint,
   cutoutFromBorder,
   EditError,
@@ -47,6 +46,28 @@ import { applyVideoFilter, concatVideos, extractFrame, splitVideo, trimVideo } f
 import { FILTER_IDS } from '../shared/filters'
 import { AUDIO_CODECS, VIDEO_CODECS } from '../shared/video'
 import { formatDuration, probeVideo } from '../core/video/probe'
+import { dataDir } from '../core/datadir'
+import { assertPathAllowed } from '../core/path-policy'
+import {
+  addStrokes,
+  clearDrawing,
+  deleteStroke,
+  loadDrawing,
+  nextAgentStrokeId,
+  undoStroke
+} from '../core/creatives-file'
+import {
+  arrowPath,
+  buildPath,
+  dotsPath,
+  ellipsePath,
+  linePath,
+  rectPath,
+  scatterDots,
+  VIEW_H,
+  VIEW_W,
+  type Stroke
+} from '../shared/creatives-draw'
 
 /**
  * Applies a geometric selection to a session as one undoable step.
@@ -72,12 +93,21 @@ function applySelectionStep(handle: EditHandle, label: string, selection: Uint8A
  * it and can outlive the window by hours, so a cached value would keep serving
  * tools long after the user switched them off.
  *
- * Absent or unreadable means allowed, matching how the app shipped.
+ * Fails **closed**. This used to treat an absent or unreadable file as allowed,
+ * on the grounds that it matched how the app shipped. That is the wrong default
+ * here and the two implementations disagreed about it: `toolsEnabled` in
+ * electron/ai/core.ts returns false when settings cannot be read, so the dock
+ * assistant already refused on a corrupt file. The same switch, opposite
+ * behaviour, is how a settings file that gets truncated mid-write ends up
+ * granting an agent the tools rather than taking them away.
  */
 function mcpEnabled(): boolean {
-  const settings = readJson<{ enableMcp?: unknown }>(dataFile('settings.json'), {})
-  if (settings.enableMcp === false) return false
-  return true
+  const settings = readJson<{ enableMcp?: unknown } | null>(dataFile('settings.json'), null)
+  // No readable file means no switch to read, so there is no consent on record.
+  if (settings === null) return false
+  // Anything other than an explicit `false` is a real setting that was set, which
+  // keeps `enableMcp: true` and an older file with no key both working.
+  return settings.enableMcp !== false
 }
 
 /** The single refusal point, so no tool can be reached while the switch is off. */
@@ -103,7 +133,7 @@ function appVersion(): string {
     const file = join(dir, 'package.json')
     if (existsSync(file)) {
       try {
-        const pkg = JSON.parse(require('node:fs').readFileSync(file, 'utf8')) as {
+        const pkg = JSON.parse(readFileSync(file, 'utf8')) as {
           name?: string
           version?: string
         }
@@ -161,11 +191,121 @@ async function guard(fn: () => Promise<Result>): Promise<Result> {
 
 const server = new McpServer({ name: 'openpics', version: appVersion() })
 
+/**
+ * Asks the person in front of the app before something irreversible happens.
+ *
+ * Two ways a tool like this goes wrong, and both are real. A `confirm: true`
+ * argument alone is a checkbox the model ticks for itself - an agent that has
+ * decided to empty the bin will pass it, and `z.literal(true)` does not slow it
+ * down at all. No gate at all is worse. So the gate is a question to a *human*,
+ * asked over MCP elicitation, which puts the decision in front of whoever is
+ * actually using the app rather than in front of the model that proposed it.
+ *
+ * Not every client can elicit. `Client does not support form elicitation` means
+ * the caller has no UI to ask, so the explicit argument is all that is left and
+ * it is honoured - degraded, but not dead. Any other failure from elicitInput is
+ * a real transport problem and is rethrown rather than quietly treated as "the
+ * client said no", because reading a timeout as a refusal would report a
+ * cancelled deletion that never happened.
+ *
+ * The prompt names the thing, not the count of things. "Delete holiday.jpg
+ * (12.4 MB, from C:\Users\me\Photos)?" is answerable; "delete 1 item?" is not.
+ */
+async function confirmWithUser(
+  message: string,
+  requestedSchema: {
+    type: 'object'
+    properties: Record<string, unknown>
+  },
+  /** Whether the caller's own argument already said yes. */
+  alreadyConfirmed: boolean
+): Promise<void> {
+  if (alreadyConfirmed) return
+  let result
+  try {
+    result = await server.server.elicitInput({ message, requestedSchema: requestedSchema as never })
+  } catch (err) {
+    const message_ = err instanceof Error ? err.message : String(err)
+    if (/does not support form elicitation/i.test(message_)) {
+      throw new EditError(
+        'this client cannot ask for confirmation, so pass confirm: true to go ahead anyway'
+      )
+    }
+    throw err
+  }
+  if (result.action === 'accept' && result.content?.confirmed === true) return
+  if (result.action === 'accept') {
+    throw new EditError('not confirmed; nothing was deleted')
+  }
+  if (result.action === 'decline') {
+    throw new EditError('declined; nothing was deleted')
+  }
+  throw new EditError('cancelled; nothing was deleted')
+}
+
+const CONFIRM_SCHEMA = {
+  type: 'object' as const,
+  properties: {
+    confirmed: {
+      type: 'boolean' as const,
+      title: 'Yes, permanently delete',
+      description: 'Required. Nothing is deleted unless this is ticked.'
+    }
+  }
+}
+
+/**
+ * A size a person can judge at a glance.
+ *
+ * Local to the MCP rather than shared: the renderer has its own formatter in
+ * `src/lib/format.ts`, and this is the only place the main process needs one.
+ * Raw bytes are useless in a confirmation prompt - "12582912 bytes" is not a
+ * number anyone can decide against.
+ */
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return 'an unknown size'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let value = bytes
+  let unit = 0
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024
+    unit++
+  }
+  // Whole bytes below 1KB, one decimal above it: "512 B" but "1.4 MB". Trailing
+  // zeros are dropped so 2 MB does not read as "2.0 MB".
+  const text = unit === 0 ? String(Math.round(value)) : value.toFixed(1).replace(/\.0$/, '')
+  return `${text} ${units[unit]}`
+}
+
+/**
+ * A path argument, checked for containment before the tool body runs.
+ *
+ * The refinement is the whole enforcement point rather than a call inside each
+ * handler, because it is the one place a new tool cannot forget: any schema
+ * built on `absPath` inherits the policy by construction, and the twenty-odd
+ * tools that already take a path gain it without being touched. The same applies
+ * to `z.array(absPath)`, which validates each element.
+ *
+ * `absPath` previously proved only that a path was absolute, and stopped one
+ * step short of proving it was *allowed* - which mattered here because this
+ * server's toolset includes permanent delete, overwrite, `openPath` and a
+ * registry write, all reachable with a path a model chose. The rule and its
+ * reasoning are in core/path-policy.ts.
+ */
 const absPath = z
   .string()
-  .describe('Absolute path to a file or folder. Backslashes are fine on Windows.')
-  .refine((p) => /^[a-zA-Z]:[\\/]/.test(p) || p.startsWith('\\\\'), {
-    message: 'must be an absolute path, e.g. C:\\Users\\me\\Pictures'
+  .describe(
+    'Absolute path to a file or folder, inside the library OpenPics has open. Backslashes are fine on Windows.'
+  )
+  .superRefine((value, ctx) => {
+    try {
+      assertPathAllowed(value)
+    } catch (err) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: err instanceof Error ? err.message : String(err)
+      })
+    }
   })
 
 server.registerTool(
@@ -488,7 +628,8 @@ server.registerTool(
       points: z
         .array(point)
         .min(3)
-        .describe('Corners in picture pixels, in order around the shape. Do not repeat the first point at the end.'),
+        .max(512)
+        .describe('Corners in picture pixels, in order around the shape. Do not repeat the first point at the end. At most 512.'),
       keep: keepSide
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true }
@@ -725,6 +866,7 @@ server.registerTool(
         .describe('Multiply alpha by this, 0-1. Below 1 softens a hard cutout.'),
       background: z
         .string()
+        .regex(/^#[0-9a-f]{6}$/i, 'must be a 6-digit hex colour like "#ffffff"')
         .nullable()
         .optional()
         .describe('6-digit hex colour like "#ffffff" to lay the cutout on instead of leaving it transparent. Null restores transparency.'),
@@ -748,7 +890,23 @@ server.registerTool(
       }
       if (args.rotate !== undefined) next.rotate = args.rotate === 0 ? undefined : args.rotate
       if (args.flip !== undefined) next.flip = args.flip ?? undefined
-      if (args.background !== undefined) next.background = args.background ?? undefined
+      if (args.background !== undefined) {
+        // Checked here, before anything is written to the session, rather than
+        // being left to the render below. `next` is a local until line 822, so a
+        // refusal here leaves the session exactly as the caller found it. The
+        // failure it prevents: a bad colour written first and rejected on render
+        // leaves the session holding a background nothing can render, so every
+        // later preview, apply and selection tool throws the same error and the
+        // picture is bricked until it is closed - and `edit_reset` does not clear
+        // it, because reset deliberately preserves output settings. This mirrors
+        // the filter check in electron/editing.ts, which exists for the same reason.
+        if (args.background !== null && !/^#[0-9a-f]{6}$/i.test(args.background)) {
+          throw new Error(
+            `background must be a 6-digit hex colour like "#ffffff", got ${JSON.stringify(args.background)}`
+          )
+        }
+        next.background = args.background ?? undefined
+      }
 
       // Sizing is replaced, not merged. Merging is what made it impossible to
       // change your mind: a session set to `percent` could not then be given
@@ -1182,14 +1340,37 @@ server.registerTool(
   'bin_purge',
   {
     title: 'Permanently delete from the Recycle Bin',
-    description: 'Erases a single item from the Recycle Bin for good. This cannot be undone.',
-    inputSchema: { id: binId },
+    description:
+      'Erases a single item from the Recycle Bin for good. This cannot be undone. Ask the user to confirm first - the app puts the question to them, so do not assume a yes. If the client cannot ask, pass confirm true.',
+    inputSchema: {
+      id: binId,
+      confirm: z
+        .boolean()
+        .optional()
+        .describe('Set true only when the client cannot ask the user, or the user has already said yes out of band.')
+    },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true }
   },
   (args) =>
     guard(async () => {
+      // Looked up before the question so the prompt can name the file. A prompt
+      // asking to delete "the item" gives the person nothing to judge against.
+      const entries = await listBin()
+      const target = entries.find((entry) => entry.id === args.id)
+      if (!target) {
+        // Named rather than purged blindly: if the id is stale the entry is
+        // already gone, and saying so beats reporting a deletion that did nothing.
+        throw new EditError(
+          `no item ${args.id} is in the Recycle Bin; call bin_list to see what is there`
+        )
+      }
+      await confirmWithUser(
+        `Permanently delete ${target.originalName} (${formatBytes(target.bytes)}, from ${target.originalPath})? This cannot be undone.`,
+        CONFIRM_SCHEMA,
+        args.confirm === true
+      )
       await purge(args.id)
-      return ok(`Permanently deleted item ${args.id}.`)
+      return ok(`Permanently deleted ${target.originalName}.`)
     })
 )
 
@@ -1197,13 +1378,34 @@ server.registerTool(
   'bin_empty',
   {
     title: 'Empty the Recycle Bin',
-    description: 'Permanently deletes everything in the Recycle Bin. This cannot be undone.',
-    inputSchema: { confirm: z.literal(true).describe('Must be true. Guards against calling this by accident.') },
+    description:
+      'Permanently deletes everything in the Recycle Bin. This cannot be undone, and it is not limited to the pictures you were working on - it is every item the user has ever deleted. Call bin_list first and show them what is about to go, then ask them to confirm; the app puts the question to them. If the client cannot ask, pass confirm true.',
+    inputSchema: {
+      confirm: z
+        .boolean()
+        .optional()
+        .describe('Set true only when the client cannot ask the user, or the user has already said yes out of band.')
+    },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true }
   },
   (args) =>
     guard(async () => {
-      if (args.confirm !== true) throw new Error('confirm must be true')
+      // Counted before the question so the prompt can say what is at stake. An
+      // empty bin is reported and nothing is asked: "delete 0 items?" invites
+      // a reflexive yes to a no-op.
+      const entries = await listBin()
+      if (entries.length === 0) return ok('The Recycle Bin is already empty; nothing was deleted.')
+      const totalBytes = entries.reduce((sum, entry) => sum + (Number.isFinite(entry.bytes) ? entry.bytes : 0), 0)
+      const named = entries
+        .slice(0, 5)
+        .map((entry) => entry.originalName)
+        .join(', ')
+      const more = entries.length > 5 ? `, and ${entries.length - 5} more` : ''
+      await confirmWithUser(
+        `Permanently delete all ${entries.length} item(s) from the Recycle Bin (${formatBytes(totalBytes)}): ${named}${more}? This cannot be undone.`,
+        CONFIRM_SCHEMA,
+        args.confirm === true
+      )
       return ok(`Permanently deleted ${await emptyBin()} item(s) from the Recycle Bin.`)
     })
 )
@@ -1462,6 +1664,267 @@ server.registerTool(
     guard(async () => {
       const out = await extractFrame(args)
       return ok(`Saved the frame at ${out.atSeconds.toFixed(3)}s to ${out.path} (${(out.bytes / 1024).toFixed(0)} KB).`)
+    })
+)
+
+/**
+ * Creatives drawing tools.
+ *
+ * The drawing on the app's Creatives page lives in `creatives.json` under the
+ * data directory - the same file the app restores from on launch and saves to
+ * as you draw. An agent calling these tools edits the user's live drawing: the
+ * running app watches the file and picks the strokes up while it is open, so
+ * the person sees the agent draw. Coordinates are artboard units, 0 to 800
+ * across and 0 to 600 down, matching the canvas exactly.
+ *
+ * Agent strokes take negative ids, minted below the lowest in the file. The
+ * canvas only ever mints positive ones, so the two sides cannot collide on an
+ * id no matter how they interleave.
+ */
+
+const artX = z.number().describe('Artboard x, 0 to 800. Clamped into range.')
+const artY = z.number().describe('Artboard y, 0 to 600. Clamped into range.')
+const inkColor = z
+  .string()
+  .regex(/^#[0-9a-fA-F]{6}$/, 'must be a hex colour like #4f9cf9')
+  .describe('Stroke colour as #rrggbb.')
+const strokeWidth = z.number().min(1).max(60).optional().describe('Stroke width. Default 6.')
+const strokeOpacity = z.number().min(10).max(100).optional().describe('Opacity percent. Default 100.')
+
+function clampArt(value: number, max: number): number {
+  if (!Number.isFinite(value)) return 0
+  return Math.min(max, Math.max(0, value))
+}
+
+/**
+ * An id no live stroke is using.
+ *
+ * Ids descend below zero, so the previous version - which seeded its minimum at
+ * 0 and subtracted one - was wrong twice over. It returned -1 whenever every live
+ * stroke id was non-negative, so two consecutive calls both got -1 and the second
+ * `creatives_add` silently overwrote the first stroke. And it ignored the negative
+ * ids it had itself handed out, so after an undo removed the lowest stroke the
+ * counter could walk back onto an id that was still in use.
+ *
+ * Both are avoided by taking the true minimum over the live ids and stepping below
+ * it, with 0 as the floor only when the drawing has no strokes at all.
+ */
+/**
+ * An id no live stroke is using.
+ *
+ * The rule itself lives in `core/creatives-file`, next to the code that saves and
+ * removes strokes, so it can be tested without an MCP session. See
+ * `nextAgentStrokeId` for why it takes the true minimum rather than seeding at zero.
+ */
+function nextAgentId(): number {
+  return nextAgentStrokeId(loadDrawing(dataDir()) ?? [])
+}
+
+server.registerTool(
+  'creatives_list',
+  {
+    title: 'List the drawing',
+    description:
+      'Returns every stroke on the Creatives page: id, kind, tool, colour, size, text and position. Read this before editing, so new marks land where the drawing actually is rather than on top of it.',
+    inputSchema: {},
+    annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+  },
+  () =>
+    guard(async () => {
+      const strokes = loadDrawing(dataDir()) ?? []
+      return json({ count: strokes.length, strokes })
+    })
+)
+
+server.registerTool(
+  'creatives_draw',
+  {
+    title: 'Draw a freehand stroke',
+    description:
+      'Draws one freehand stroke through the given artboard points, smoothed the same way the canvas smooths a pointer. Appears live in the open app. At least one point; a single point paints a dot.',
+    inputSchema: {
+      points: z
+        .array(z.object({ x: artX, y: artY }))
+        .min(1)
+        .max(500)
+        .describe('Gesture to draw, in order.'),
+      tool: z
+        .enum(['brush', 'pencil', 'marker', 'highlighter', 'neon', 'airbrush'])
+        .optional()
+        .describe('Which instrument. Default brush.'),
+      color: inkColor.optional().describe('Stroke colour. Default #111827.'),
+      width: strokeWidth,
+      opacity: strokeOpacity,
+      density: z.number().int().min(1).max(10).optional().describe('Airbrush spray density. Default 4.'),
+      glow: z.number().min(2).max(12).optional().describe('Neon glow radius. Default 6.')
+    },
+    annotations: { readOnlyHint: false, openWorldHint: false }
+  },
+  (args) =>
+    guard(async () => {
+      const points = args.points.map((p) => ({ x: clampArt(p.x, VIEW_W), y: clampArt(p.y, VIEW_H) }))
+      const tool = args.tool ?? 'brush'
+      const width = args.width ?? 6
+      const id = nextAgentId()
+      const base = {
+        id,
+        color: args.color ?? '#111827',
+        width,
+        opacity: tool === 'highlighter' ? Math.min(args.opacity ?? 100, 60) : (args.opacity ?? 100),
+        tool
+      } as const
+      const stroke: Stroke =
+        tool === 'airbrush'
+          ? {
+              ...base,
+              kind: 'dots',
+              d: dotsPath(
+                scatterDots(points, width, args.density ?? 4, Math.abs(id)),
+                Math.max(1, width / 4)
+              )
+            }
+          : { ...base, kind: 'path', d: buildPath(points), blur: tool === 'neon' ? (args.glow ?? 6) : undefined }
+      const drawing = addStrokes(dataDir(), [stroke])
+      return ok(`Drew stroke ${id} (${tool}, ${points.length} points). The drawing now holds ${drawing.length} strokes.`)
+    })
+)
+
+server.registerTool(
+  'creatives_shape',
+  {
+    title: 'Draw a shape',
+    description:
+      'Draws a line, rectangle, ellipse or arrow from one artboard corner to the opposite. Appears live in the open app. Rectangles and ellipses can be filled.',
+    inputSchema: {
+      kind: z.enum(['line', 'rect', 'ellipse', 'arrow']).describe('Which shape.'),
+      x1: artX,
+      y1: artY,
+      x2: artX,
+      y2: artY,
+      color: inkColor.optional().describe('Outline colour. Default #111827.'),
+      width: strokeWidth,
+      opacity: strokeOpacity,
+      dash: z.enum(['solid', 'dash', 'dot']).optional().describe('Outline style. Default solid.'),
+      fill: inkColor.optional().describe('Fill colour for rectangles and ellipses. Absent means unfilled.')
+    },
+    annotations: { readOnlyHint: false, openWorldHint: false }
+  },
+  (args) =>
+    guard(async () => {
+      const x1 = clampArt(args.x1, VIEW_W)
+      const y1 = clampArt(args.y1, VIEW_H)
+      const x2 = clampArt(args.x2, VIEW_W)
+      const y2 = clampArt(args.y2, VIEW_H)
+      const d =
+        args.kind === 'line'
+          ? linePath(x1, y1, x2, y2)
+          : args.kind === 'rect'
+            ? rectPath(x1, y1, x2, y2)
+            : args.kind === 'ellipse'
+              ? ellipsePath(x1, y1, x2, y2)
+              : arrowPath(x1, y1, x2, y2)
+      const id = nextAgentId()
+      const drawing = addStrokes(dataDir(), [
+        {
+          id,
+          kind: 'shape',
+          d,
+          color: args.color ?? '#111827',
+          width: args.width ?? 6,
+          opacity: args.opacity ?? 100,
+          tool: args.kind,
+          dash: args.dash ?? 'solid',
+          fill: args.kind === 'rect' || args.kind === 'ellipse' ? (args.fill ?? null) : null
+        }
+      ])
+      return ok(`Drew ${args.kind} ${id}. The drawing now holds ${drawing.length} strokes.`)
+    })
+)
+
+server.registerTool(
+  'creatives_text',
+  {
+    title: 'Place text',
+    description: 'Places a text label at an artboard point. Appears live in the open app.',
+    inputSchema: {
+      x: artX,
+      y: artY,
+      text: z.string().min(1).max(200).describe('The words to place.'),
+      size: z.number().int().min(8).max(200).optional().describe('Font size in artboard units. Default 32.'),
+      font: z.enum(['sans-serif', 'serif', 'monospace', 'cursive']).optional().describe('Font family. Default sans-serif.'),
+      color: inkColor.optional().describe('Text colour. Default #111827.'),
+      opacity: strokeOpacity
+    },
+    annotations: { readOnlyHint: false, openWorldHint: false }
+  },
+  (args) =>
+    guard(async () => {
+      const id = nextAgentId()
+      const drawing = addStrokes(dataDir(), [
+        {
+          id,
+          kind: 'text',
+          d: '',
+          color: args.color ?? '#111827',
+          width: 6,
+          opacity: args.opacity ?? 100,
+          tool: 'text',
+          text: args.text,
+          fontSize: args.size ?? 32,
+          fontFamily: args.font ?? 'sans-serif',
+          dx: clampArt(args.x, VIEW_W),
+          dy: clampArt(args.y, VIEW_H)
+        }
+      ])
+      return ok(`Placed text ${id} ("${args.text.slice(0, 40)}"). The drawing now holds ${drawing.length} strokes.`)
+    })
+)
+
+server.registerTool(
+  'creatives_undo',
+  {
+    title: 'Undo the last stroke',
+    description: 'Removes the most recently added stroke from the drawing. Use it when the previous call misfired.',
+    inputSchema: {},
+    annotations: { readOnlyHint: false, openWorldHint: false }
+  },
+  () =>
+    guard(async () => {
+      const undone = undoStroke(dataDir())
+      if (!undone) return ok('The drawing is already empty; nothing was undone.')
+      return ok(`Undid stroke ${undone.id}.`)
+    })
+)
+
+server.registerTool(
+  'creatives_delete',
+  {
+    title: 'Delete one stroke',
+    description: 'Removes the stroke with the given id. Read ids from creatives_list first.',
+    inputSchema: {
+      id: z.number().int().describe('Stroke id from creatives_list.')
+    },
+    annotations: { readOnlyHint: false, openWorldHint: false }
+  },
+  (args) =>
+    guard(async () => {
+      if (!deleteStroke(dataDir(), args.id)) return { content: [{ type: 'text', text: `No stroke with id ${args.id}.` }], isError: true }
+      return ok(`Deleted stroke ${args.id}.`)
+    })
+)
+
+server.registerTool(
+  'creatives_clear',
+  {
+    title: 'Clear the drawing',
+    description: 'Empties the whole drawing. Destructive and immediate - prefer creatives_undo or creatives_delete for mistakes.',
+    inputSchema: {},
+    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false }
+  },
+  () =>
+    guard(async () => {
+      clearDrawing(dataDir())
+      return ok('The drawing is empty.')
     })
 )
 

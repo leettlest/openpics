@@ -28,9 +28,33 @@ function normalise(p: string): string {
   return resolved.toLowerCase()
 }
 
-function isAllowed(target: string): boolean {
+/**
+ * True when the target is inside a root the renderer is allowed to read from.
+ *
+ * The prefix test appends a separator to the root, so a root of `C:\photos`
+ * does not admit `C:\photos-private` - the mistake a bare `startsWith` makes.
+ * `normalise` has already lower-cased both sides, which Windows requires.
+ */
+export function isAllowed(target: string): boolean {
   const norm = normalise(target)
   return allowedRoots.some((root) => norm === root || norm.startsWith(root + '\\'))
+}
+
+/**
+ * True when a library is open to check paths against.
+ *
+ * `isAllowed` answers "no" both for a path outside the library and for no library
+ * being open at all. That is the right answer for a thumbnail, which simply has
+ * none to serve, and the wrong one for a refusal message - "outside the library"
+ * misdescribes the case where nothing has been opened yet.
+ */
+export function hasAllowedRoots(): boolean {
+  return allowedRoots.length > 0
+}
+
+/** The roots currently permitted, for a message that says what is permitted. */
+export function allowedRootList(): string[] {
+  return [...allowedRoots]
 }
 
 /** Formats that keep a real alpha channel in the generated thumbnail. */
@@ -260,7 +284,10 @@ async function handleThumb(request: Request): Promise<Response> {
 
     if (pruneCountdown-- <= 0) {
       pruneCountdown = 200
-      pruneDisk()
+      // Off the request path: a directory walk plus deletes in the middle of a
+      // scroll burst is a visible stall, while the same work a tick later - after
+      // this response is already built - costs nothing the user can feel.
+      setImmediate(() => pruneDisk())
     }
 
     return new Response(new Uint8Array(entry.body), {

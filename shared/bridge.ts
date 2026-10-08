@@ -10,12 +10,15 @@ import type {
   WallpaperState
 } from './protocol'
 import type {
+  AiChatActivity,
   AiChatContext,
+  AiChatDelta,
   AiChatReply,
   AiModelInfo,
   AiState
 } from './ai-types'
 import type { SimilarHit } from './ai-similar'
+import type { Stroke } from './creatives-draw'
 import type {
   ApplyOptions,
   BrushOptions,
@@ -77,7 +80,27 @@ export interface OpenPicsBridge {
      * Files handed to the app by Windows, from a context-menu or "Open with"
      * launch. Returns an unsubscribe function.
      */
-    onOpenFiles(handler: (paths: string[]) => void): () => void
+    onOpenFiles(handler: (paths: string[]) => void): () => void,
+    /**
+     * Folders handed to the app on the command line (`openpics "C:\pics"`).
+     * The first one becomes the library root; the rest are ignored, because the
+     * library has one root and silently picking would be a worse surprise than
+     * saying so. Returns an unsubscribe function.
+     */
+    onOpenFolders(handler: (folders: string[]) => void): () => void
+  },
+  /**
+   * Drawing persistence for the Creatives page.
+   *
+   * Strokes are restored on mount and saved debounced on change, so a restart
+   * keeps the drawing. Validation happens main-side; a corrupt file reads back
+   * as null rather than as shapes that crash the canvas.
+   */
+  creatives: {
+    /** The saved drawing, or null when there is none. */
+    load(): Promise<Stroke[] | null>,
+    /** Stores the drawing; failures never reject, so drawing never breaks. */
+    save(strokes: Stroke[]): Promise<void>
   }
   /**
    * Non-destructive picture editing.
@@ -238,6 +261,12 @@ export interface OpenPicsBridge {
   }
   onOpenChat(handler: () => void): () => void
   onCommand(handler: (command: string) => void): () => void,
+  /**
+   * Fires when the drawing file changed under the app - an agent editing over
+   * MCP, or another window of it. The payload is empty on purpose: the drawing
+   * is reloaded and merged, never trusted blind from the channel.
+   */
+  onCreativesChanged(handler: () => void): () => void
   /** Local AI (llama.cpp, fully local). */
   ai: {
     /** Initialize/load model and ensure prompt file exists. */
@@ -253,9 +282,17 @@ export interface OpenPicsBridge {
     /** Write user-editable prompt contents. */
     setPrompt(content: string): Promise<{ path: string; content: string }>,
     /** Chat with AI, streamed piece by piece through onDelta. */
-    chat(message: string, context?: AiChatContext): Promise<AiChatReply>,
+    chat(message: string, context?: AiChatContext, requestId?: number): Promise<AiChatReply>,
+    /** Cancel an in-flight chat request; stale pieces and replies are ignored. */
+    cancel(requestId: number): Promise<void>,
     /** Subscribe to streamed reply pieces; returns an unsubscribe function. */
-    onDelta(handler: (delta: string) => void): () => void,
+    onDelta(handler: (update: AiChatDelta) => void): () => void,
+    /**
+     * Subscribe to what the assistant is doing between text. Fires with the tool
+     * it is about to run, and with null when the gap is over. Returns an
+     * unsubscribe function.
+     */
+    onTool(handler: (update: AiChatActivity) => void): () => void,
     /** Suggest tags for the given files (from pixels when the vision model is present). */
     autotag(targets: Array<{ id: string; path: string }>): Promise<Array<{ photoId: string; tags: string[] }>>,
     /** Perceptually similar photos among `candidates`, closest first. */
@@ -279,9 +316,13 @@ export type Command = (typeof COMMAND)[keyof typeof COMMAND]
 export const COMMAND_CHANNEL = 'opencpics:command'
 export const SCAN_PROGRESS_CHANNEL = 'opencpics:scan-progress'
 export const OPEN_FILES_CHANNEL = 'opencpics:open-files'
+export const OPEN_FOLDERS_CHANNEL = 'opencpics:open-folders'
 export const TERMINAL_DATA_CHANNEL = 'opencpics:terminal-data'
 export const TERMINAL_EXIT_CHANNEL = 'opencpics:terminal-exit'
 export const AI_DELTA_CHANNEL = 'opencpics:ai-delta'
+export const AI_TOOL_CHANNEL = 'opencpics:ai-tool'
+export const OPEN_CHAT_CHANNEL = 'opencpics:open-chat'
+export const CREATIVES_CHANGED_CHANNEL = 'opencpics:creatives-changed'
 
 
 
